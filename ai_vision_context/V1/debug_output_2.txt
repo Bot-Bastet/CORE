@@ -1,0 +1,44 @@
+=========================================
+   MODE DEBUG 'CHEAT' - BASTET AI
+=========================================
+STATUS: Salles STT/TTS DESACTIVÉES.
+STATUS: Web UI DESACTIVÉE.
+STATUS: Vision Physique DESACTIVÉE (Simulation active).
+[CONFIG] Chargé: Provider=local, URL=http://localhost:1234/v1
+
+[SYSTEM] Démarrage AI Agent (local)...
+DEBUG: AIAgent.run called
+[SYSTEM] Attente disponibilité modèle...
+Loading AI Model: Mistral Debug (Provider: local)...
+llama_context: n_ctx_per_seq (2048) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+Model loaded successfully from ./models\Mistral-7B-Instruct-v0.3.Q5_K_M.gguf.
+AI Agent Loop Started...
+
+[SYSTEM] Modèle PRÊT.
+
+-----------------------------------------
+COMMANDES DE SIMULATION:
+  /nob     -> Simuler: Personne (0 visages)
+  /unk     -> Simuler: Inconnu (1 visage)
+  /tea     -> Simuler: Teano (Déclenche Agenda)
+  /refr    -> Rafraichir Agenda (Force)
+  /quit    -> Quitter
+-----------------------------------------
+Tapez votre message pour parler au LLM.
+
+
+> 
+[Bastet Wake Up]...
+DEBUG: Generating Reaction...
+
+[Bastet]: [VISION SIMULÉE] Inconnu présent.
+
+> 
+>  Bonjour.
+
+[Utilisateur]: Qui est devant la camera ?
+DEBUG: Generating Reaction...
+
+[Bastet]:  Bonjour.
+
+[SYSTEM] Arrêt du système.

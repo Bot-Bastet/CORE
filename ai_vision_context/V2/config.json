@@ -1,0 +1,19 @@
+{
+    "ai_provider": "lmstudio",
+    "lm_studio_url": "http://192.168.0.57:1234/v1",
+    "model_path": "./models/nemomix-unleashed-12b.gguf",
+    "yolo_model": "yolov8n.pt",
+    "camera_id": 0,
+    "yolo_resolution": [
+        640,
+        480
+    ],
+    "yolo_fps": 30,
+    "face_resolution": [
+        640,
+        480
+    ],
+    "tts_enabled": false,
+    "stt_enabled": false,
+    "tts_voice": "fr-FR-DeniseNeural"
+}

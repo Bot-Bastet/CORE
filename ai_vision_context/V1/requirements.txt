@@ -1,0 +1,16 @@
+opencv-python
+ultralytics
+mediapipe
+transformers
+torch
+accelerate
+protobuf
+sentencepiece
+SpeechRecognition
+pyaudio
+llama-cpp-python
+huggingface_hub
+keyring
+requests
+edge-tts
+pygame

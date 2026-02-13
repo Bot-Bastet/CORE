@@ -1,0 +1,17 @@
+=========================================
+   MODE DEBUG 'CHEAT' - BASTET AI
+=========================================
+STATUS: Salles STT/TTS DESACTIVÉES.
+STATUS: Web UI DESACTIVÉE.
+STATUS: Vision Physique DESACTIVÉE (Simulation active).
+[CONFIG] Chargé: Provider=local, URL=http://localhost:1234/v1
+
+[SYSTEM] Démarrage AI Agent (local)...
+DEBUG: AIAgent.run called
+Loading AI Model: Mistral Debug (Provider: local)...
+Exception ignored in: <function LlamaModel.__del__ at 0x00000250F48A6D40>
+Traceback (most recent call last):
+  File "C:\Users\Teano\AppData\Local\Programs\Python\Python311\Lib\site-packages\llama_cpp\_internals.py", line 86, in __del__
+[SYSTEM] Attente disponibilité modèle...
+Error loading model: Failed to load model from file: ./models\Mistral-7B-Instruct-v0.3.Q5_K_M.gguf
+[FATAL] L'agent AI n'a pas pu démarrer.

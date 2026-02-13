@@ -1,0 +1,5 @@
+{
+    "ai_provider": "lmstudio",
+    "lm_studio_url": "http://192.168.0.57:1234/v1",
+    "model_path": "./models/nemomix-unleashed-12b.gguf"
+}

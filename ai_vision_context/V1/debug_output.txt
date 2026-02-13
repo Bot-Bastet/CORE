@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "D:\Projet annuel\detection crane\ai_vision_context\debug_mode.py", line 16, in <module>
+    from ai_agent import AIAgent
+  File "D:\Projet annuel\detection crane\ai_vision_context\ai_agent.py", line 171
+    )
+    ^
+SyntaxError: unmatched ')'

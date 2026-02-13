@@ -1,0 +1,49 @@
+# Global
+node_modules/
+models/
+
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Models
+*.pt
+*.onnx
+*.tflite
+*.pb
+*.h5
+*.hdf5
+*.keras
+*.ckpt
+*.safetensors
+
+# YOLO / Ultralytics
+runs/
+yolov8*.pt
+yolov8*.zip
+yolo*.pt
+
+# Virtual Environments
+venv/
+env/
+.env
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Large Data
+*.zip
+*.tar.gz
+*.mp4
+*.avi
+*.mov
+*.mkv

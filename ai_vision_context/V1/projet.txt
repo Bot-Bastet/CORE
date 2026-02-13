@@ -1,0 +1,21 @@
+Objectif du Projet : Bastet
+
+Le but du projet Bastet est de développer un programme en Python capable de :
+
+Reconnaissance faciale : Identifier les personnes présentes devant la caméra de l'ordinateur.
+
+Text-to-Speech (TTS) et Speech-to-Text (STT) : Permettre des interactions vocales où le programme peut comprendre et répondre à l'utilisateur.
+
+Intégration d'un modèle de langage (LLM) : Utiliser un LLM pour traiter des requêtes en langage naturel et fournir des réponses pertinentes.
+
+Reconnaissance d'objets avec YOLO : Détecter et identifier les objets présents dans le champ de la caméra.
+
+Fonctionnement du Programme :
+
+Identification des personnes : Le programme utilise la caméra pour détecter les visages. Si un visage est reconnu, il vérifie si l'identifiant de l'utilisateur est enregistré dans l'API MyGES Scolae.
+
+Lecture de l'agenda : Si l'utilisateur est identifié et a connecté son compte MyGES Scolae, le programme lit automatiquement son agenda et l'intègre dans les conversations du LLM.
+
+Interaction fluide : Si l'utilisateur est devant l'ordinateur, le LLM peut répondre aux questions et fournir des informations sur l'agenda. Si l'utilisateur quitte brièvement le champ de la caméra, le programme maintient l'accès à l'agenda pour une interaction continue.
+
+Réactivité : L'objectif est d'assurer une interaction rapide et naturelle, permettant au programme de reconnaître les utilisateurs et de répondre de manière personnalisée.     

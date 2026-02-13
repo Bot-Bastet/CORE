@@ -1,0 +1,29 @@
+# Bastet AI V2 Requirements
+fastapi>=0.100.0
+uvicorn>=0.23.0
+websockets>=11.0
+pydantic>=2.0
+python-multipart>=0.0.6
+
+# AI / LLM
+requests>=2.31.0
+# llama-cpp-python>=0.2.0  # Uncomment for local model support
+
+# Vision
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+face-recognition>=1.3.0
+numpy>=1.24.0
+mediapipe>=0.10.0
+
+# Audio
+edge-tts>=6.1.0
+pygame>=2.5.0
+SpeechRecognition>=3.10.0
+vosk>=0.3.45
+sounddevice>=0.4.6
+pyttsx3>=2.90
+# openai-whisper>=20231117  # Optional - heavy, use vosk instead
+
+# Utils
+torch>=2.0.0
