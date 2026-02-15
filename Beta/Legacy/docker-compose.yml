@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  core:
+    build: .
+    container_name: bastet-core
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    environment:
+      - PYTHONUNBUFFERED=1
+    devices:
+      # Mapping de la caméra si disponible sur le serveur (Linux)
+      - "/dev/video0:/dev/video0"
+    restart: unless-stopped
+    # Si besoin de GPU pour YOLO/Face Rec (Nvidia Container Toolkit requis)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  web:
+    image: node:18-alpine
+    container_name: bastet-web
+    working_dir: /app
+    volumes:
+      - ./web:/app
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run dev -- --host"
+    depends_on:
+      - core

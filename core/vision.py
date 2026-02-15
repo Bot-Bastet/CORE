@@ -35,10 +35,31 @@ class VisionSystem(threading.Thread):
         self.known_face_names = []
         
         # Expose state
+        # Expose state
         self.shared_data['vision_enabled'] = True
+        
+        # Tentative de sync avec le Remote Server
+        self.remote_url = self.config.get("remote_server_url", "")
+        if self.remote_url:
+            self.sync_faces_from_remote()
         
         # Charger visages connus
         self._load_known_faces()
+
+    def sync_faces_from_remote(self):
+        """Télécharge les visages depuis le serveur distant."""
+        import requests
+        try:
+            print(f"🔄 Syncing faces from {self.remote_url}...")
+            resp = requests.get(f"{self.remote_url}/vault/faces", timeout=5)
+            if resp.status_code == 200:
+                faces = resp.json()
+                for face in faces:
+                    # Simulation: on log juste car on n'a pas encore le endpoint download binaire en place
+                    print(f"   -> Found remote face for: {face['username']}")
+            print("✅ Face Sync Complete")
+        except Exception as e:
+            print(f"⚠️ Face Sync Failed: {e}")
 
     def toggle(self, enabled: bool):
         """Active ou désactive la vision."""

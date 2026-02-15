@@ -116,31 +116,51 @@ async def startup_event():
 def boot_system():
     time.sleep(1)
     
-    # TTS (désactivé par défaut)
-    state.tts = TTSHandler(state.config, state.shared_data)
-    print(f"✓ TTS initialisé (désactivé par défaut)")
+    role = os.environ.get("BASTET_ROLE", "all")
+    print(f"CORE System booting in mode: {role}")
+
+    # TTS
+    if role in ["all", "tts"]:
+        state.tts = TTSHandler(state.config, state.shared_data)
+        print(f"✓ TTS initialisé (Local)")
+    elif role == "hub":
+        print(f"ℹ TTS: En attente de nœud distant")
     
-    # Calendar
-    state.calendar = CalendarIntegration(state.config, state.shared_data)
-    state.calendar.connect()
+    # Calendar (Toujours sur le Hub pour l'instant)
+    if role in ["all", "hub"]:
+        state.calendar = CalendarIntegration(state.config, state.shared_data)
+        state.calendar.connect()
+        print(f"✓ Calendar initialisé")
     
     # Vision
-    time.sleep(0.5)
-    state.vision = VisionSystem(state.config, state.shared_data)
-    state.vision.start()
+    if role in ["all", "vision"]:
+        time.sleep(0.5)
+        state.vision = VisionSystem(state.config, state.shared_data)
+        state.vision.start()
+        print(f"✓ Vision System initialisé (Local)")
+    elif role == "hub":
+        print(f"ℹ Vision System: En attente de nœud distant")
     
-    # STT (Vosk - léger)
-    time.sleep(0.3)
-    state.stt = STTHandler(state.config, state.shared_data)
-    state.stt.start()
+    # STT (Vosk)
+    if role in ["all", "stt"]:
+        time.sleep(0.3)
+        state.stt = STTHandler(state.config, state.shared_data)
+        state.stt.start()
+        print(f"✓ STT initialisé (Local)")
+    elif role == "hub":
+        print(f"ℹ STT: En attente de nœud distant")
     
     # AI Agent
-    time.sleep(0.3)
-    state.ai_agent = AIAgent(state.config, state.shared_data)
-    state.ai_agent.start()
+    if role in ["all", "llm"]:
+        time.sleep(0.3)
+        state.ai_agent = AIAgent(state.config, state.shared_data)
+        state.ai_agent.start()
+        print(f"✓ AI Agent initialisé (Local)")
+    elif role == "hub":
+        print(f"ℹ AI Agent: En attente de nœud distant")
     
     print("\n" + "="*50)
-    print("       BASTET AI V2 - Prêt!")
+    print(f"       BASTET AI V2 - Prêt ({role})")
     print("="*50 + "\n")
 
 
@@ -324,6 +344,102 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+
+@app.websocket("/ws/node/{role}")
+async def node_websocket_endpoint(websocket: WebSocket, role: str):
+    """Endpoint pour les nœuds distants (Vision, LLM)."""
+    await manager.connect(websocket)
+    print(f"➕ Nœud connecté: {role}")
+    
+    try:
+        while True:
+            message = await websocket.receive_text()
+            data = json.loads(message)
+            msg_type = data.get("type")
+            payload = data.get("payload")
+            
+            # Détection de personne (Vision)
+            if msg_type == "vision_update":
+                state.shared_data["vision_context"] = payload
+                
+                # Si une personne est reconnue, on enrichit le contexte via le Remote Server
+                detected_names = payload.get("faces", [])
+                for name in detected_names:
+                    if name != "Inconnu":
+                        # Appel au Remote Server (Scraping Sécurisé)
+                        remote_url = state.config.get("remote_server_url")
+                        if remote_url:
+                            try:
+                                import requests
+                                print(f"🔍 Enriching data for {name} via Remote Server...")
+                                resp = requests.get(f"{remote_url}/scrape/myges/{name}", timeout=5)
+                                if resp.status_code == 200:
+                                    user_data = resp.json()
+                                    # On pousse ces infos dans le contexte partagé pour le LLM
+                                    state.shared_data[f"user_context_{name}"] = user_data
+                                    print(f"✅ Data retrieved for {name}: {user_data.get('next_class')}")
+                            except Exception as e:
+                                print(f"⚠️ Scraping Failed: {e}")
+
+                await manager.broadcast({
+                    "type": "status_update",
+                    "payload": {"vision": payload}
+                })
+                
+            elif msg_type == "ai_response":
+                # Réponse de l'IA distante
+                content = payload.get("content")
+                timestamp = payload.get("timestamp")
+                
+                # Check doublon ? (Simplifié ici)
+                state.shared_data["latest_ai_response"] = payload
+                
+                # Broadcast Chat + TTS
+                state.chat_history.append({"role": "assistant", "content": content})
+                await manager.broadcast({
+                    "type": "chat_message",
+                    "payload": {"role": "assistant", "content": content}
+                })
+                
+                if state.tts and state.tts.is_enabled():
+                    state.tts.speak(content)
+                    
+    except WebSocketDisconnect:
+        print(f"➖ Nœud déconnecté: {role}")
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"Erreur WebSocket Node ({role}): {e}")
+        manager.disconnect(websocket)
+
+
+@app.post("/offer")
+async def offer(params: dict):
+    """
+    WebRTC Signaling: Echange d'offres/réponses SDP.
+    Le streamer (Robot) envoie une OFFRE.
+    Le viewer (Vision/Web) envoie une RÉPONSE.
+    """
+    # Simplification: On broadcast l'offre à tous les nœuds Vision connectés
+    # Dans une vraie implém, on ciblerait un pair spécifique via ID.
+    # Ici, on stocke l'offre et on attend qu'un Viewer la consomme via polling ou WS.
+    
+    # Pour l'instant, on utilise le WS Broadcast pour avertir
+    await manager.broadcast({
+        "type": "webrtc_offer",
+        "payload": params
+    })
+    return {"status": "ok"}
+
+@app.post("/answer")
+async def answer(params: dict):
+    """
+    WebRTC Signaling: Réponse du Viewer vers le Streamer.
+    """
+    await manager.broadcast({
+        "type": "webrtc_answer",
+        "payload": params
+    })
+    return {"status": "ok"}
 
 def run_server():
     uvicorn.run(app, host="0.0.0.0", port=8000)
