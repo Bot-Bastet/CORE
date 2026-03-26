@@ -16,8 +16,10 @@ try:
 except ImportError:
     MyGesIntegration = None
 
-# Timeout en secondes avant de retirer l'agenda du contexte
-PRESENCE_TIMEOUT = 5.0
+# Timeout en secondes avant de retirer l'agenda du contexte (5 minutes)
+PRESENCE_TIMEOUT = 300.0
+# Durée de validité du cache agenda (5 minutes - forcer un refresh fréquent)
+CACHE_TTL = 300
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "cache")
 
 
@@ -82,7 +84,7 @@ class CalendarIntegration:
         self.last_seen_time = now
 
     def check_presence_timeout(self):
-        """Vérifie si la personne est toujours là, sinon retire l'agenda du contexte."""
+        """Vérifie si la personne est toujours là, sinon retire l'agenda du contexte après PRESENCE_TIMEOUT."""
         if not self.current_person:
             return
         
@@ -90,12 +92,10 @@ class CalendarIntegration:
         
         if now - self.last_seen_time > PRESENCE_TIMEOUT:
             # Personne partie depuis plus de X secondes
-            print(f"⏳ {self.current_person} plus visible - agenda retiré du contexte")
+            print(f"⏳ {self.current_person} plus visible depuis {PRESENCE_TIMEOUT}s - réinitialisation")
             
-            # Sauvegarder en cache avant de retirer
-            self._save_to_cache(self.current_person)
-            
-            # Retirer du contexte LLM
+            # On garde le dernier agenda en mémoire mais on vide le contexte LLM
+            # pour ne pas attribuer à un inconnu les données de la personne précédente
             self.current_person = None
             self.shared_data['schedule_context'] = ""
 
@@ -103,27 +103,35 @@ class CalendarIntegration:
         """Charge l'agenda depuis le cache ou fetch depuis MyGES."""
         cache_file = os.path.join(CACHE_DIR, f"{person_name.lower()}_agenda.json")
         
-        # Essayer de charger depuis le cache (si moins de 30 min)
+        # Essayer de charger depuis le cache (si moins de CACHE_TTL secondes)
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     cache_time = data.get('timestamp', 0)
-                    if time.time() - cache_time < 1800:  # 30 minutes
+                    if time.time() - cache_time < CACHE_TTL:
+                        print(f"📋 Agenda chargé depuis le cache pour {person_name}")
                         self.shared_data['schedule_context'] = data.get('context', '')
                         self.cached_agendas[person_name] = data.get('context', '')
                         return
+                    else:
+                        print(f"♻ Cache expiré pour {person_name}, re-fetch depuis MyGES...")
             except:
                 pass
         
-        # Sinon fetch depuis MyGES
+        # Sinon fetch fresh depuis MyGES
         if self.myges and self.ready:
-            if time.time() < getattr(self.myges, 'token_expires_at', 0):
-                self.myges._fetch_agenda()
+            # Renouveler le token si expiré
+            if time.time() >= getattr(self.myges, 'token_expires_at', 0):
+                print("🔄 Token MyGES expiré - reconnexion...")
+                self.myges._get_token()
+            self.myges._fetch_agenda()
             context = self._build_context()
             self.shared_data['schedule_context'] = context
             self.cached_agendas[person_name] = context
             self._save_to_cache(person_name)
+        else:
+            print("⚠ MyGES non connecté, agenda indisponible.")
 
     def _save_to_cache(self, person_name: str):
         """Sauvegarde l'agenda en cache."""
