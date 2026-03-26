@@ -27,7 +27,7 @@ print("\nNous allons configurer vos identifiants pour qu'ils soient securises")
 print("par le gestionnaire de mots de passe de votre systeme (Windows Credential Manager).")
 print("Ils ne seront JAMAIS stockes en texte clair.\n")
 
-user = input("Identifiant MyGES (prenom.nom) : ").strip()
+user = input("Identifiant MyGES (p.nom) : ").strip()
 
 import getpass
 pwd = getpass.getpass("Mot de passe (cache) : ")
