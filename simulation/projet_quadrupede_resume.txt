@@ -1,0 +1,49 @@
+Synthèse du Projet – Robot Quadrupède 3D + Simulation PyBullet
+
+Objectif Général
+
+Créer un robot quadrupède imprimé en 3D, puis le simuler sous PyBullet
+avec : - ses dimensions exactes, - la géométrie des pattes, - les
+positions des moteurs, - la limite de couple réelle : 65 N·cm (6.5
+N·m), - un URDF généré en Python, - un contrôle PD simple.
+
+Dimensions du Robot
+
+-   Longueur du corps : 80 cm
+-   Largeur : ~50 cm
+-   Hauteur du châssis : ~10 cm dans PyBullet
+-   Hauteur totale jambe tendue : 65 cm
+-   Cuisse : 32.5 cm
+-   Tibia : 32.5 cm
+
+Moteurs
+
+-   2 moteurs par patte → 8 moteurs
+-   Couple max réel : 65 N·cm = 6.5 N·m
+-   Même configuration dans PyBullet :
+    -   max_torque = 6.5
+
+Simulation PyBullet
+
+Réalisé : - Génération automatique d’un URDF virtuel. - 4 pattes
+articulées + châssis. - PD controller : KP=60, KD=3. - TIME_STEP =
+1/240. - Châssis relevé : BASE_MID_HEIGHT = 0.20 m.
+
+Problèmes rencontrés : - Pattes dépassant au-dessus du châssis →
+corrigé. - Robot s’écrasant → dû au torque limité. - Fix de l’erreur
+syntaxique KD. - Hanches à repositionner (besoin possible d’un
+HIP_OFFSET_Z = -0.05 m).
+
+Ce que l’on essaye de faire maintenant
+
+-   Obtenir une simulation stable.
+-   Corriger définitivement la géométrie des segments et articulations.
+-   Stabiliser la posture avec les torques réels.
+-   Préparer la suite : IK, marche, URDF final propre.
+
+Étapes Futures
+
+1.  Ajuster offsets de hanche et genou.
+2.  Définir masses précises.
+3.  Ajouter contrôle dynamique.
+4.  Exporter URDF propre.
