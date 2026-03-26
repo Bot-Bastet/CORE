@@ -63,30 +63,40 @@ class AIAgent(threading.Thread):
             except Exception as e:
                 print(f"✗ Erreur chargement modèle: {e}")
 
-    def get_system_prompt(self):
+    def get_system_prompt(self, schedule_context: str = ""):
         """Retourne le prompt système de Bastet."""
         now = datetime.now()
         date_str = now.strftime("%A %d %B %Y")
         time_str = now.strftime("%H:%M")
         
+        agenda_block = ""
+        if schedule_context:
+            agenda_block = f"""
+
+AGENDA DE L'UTILISATEUR (SOURCE DE VÉRITÉ ABSOLUE - NE JAMAIS INVENTER):
+{schedule_context}
+RESPECTE CES HORAIRES À LA LETTRE. Le premier cours du jour est la première entrée AUJOURD'HUI dans cet agenda.
+"""
+        
         return f"""Tu es Bastet, une IA d'assistance embarquée dans un robot communiquant avec des humains.
 
 DATE/HEURE: {date_str}, {time_str}
-
+{agenda_block}
 RÈGLES STRICTES:
+- Utilise UNIQUEMENT l'agenda fourni ci-dessus pour répondre aux questions de planning/cours. Ne devin JAMAIS un horaire.
 - Réponds UNIQUEMENT à ce qui est demandé
 - Sois TRÈS CONCISE (1-2 phrases max)
 - Pas de blabla, pas de formules de politesse excessives
 - Si on demande "demain", ne parle QUE de demain
 - Si on demande un cours spécifique, ne cite QUE celui-là
 - Utilise un langage naturel et décontracté
-- Tu as accès à l'agenda et tu sais qui est devant toi
-- IMPORTANT : Tu dois envoyer des commandes spécifiques au robot physique selon le contexte de la discussion (ex. dire bonjour, se déplacer, exprimer une émotion). Ajoute les suites de caractères requises à la fin de ton texte lorsque tu veux actionner le robot (ex: [CMD: action_name])."""
+- IMPORTANT : Pour commander le robot physique, ajoute [CMD: action] à la fin de ta réponse (ex: [CMD: avancer])."""
+
 
     def generate_reaction(self, vision_data: dict, schedule_context: str, user_input: str = None):
         """Génère une réponse basée sur le contexte."""
         
-        # Construire le contexte
+        # Construire le contexte visuel
         context_parts = []
         
         if vision_data:
@@ -97,16 +107,14 @@ RÈGLES STRICTES:
             if objects:
                 context_parts.append(f"Objets détectés: {', '.join(objects[:5])}")
         
-        if schedule_context:
-            context_parts.append(f"Agenda: {schedule_context}")
+        vision_context = " | ".join(context_parts) if context_parts else ""
         
-        context = " | ".join(context_parts) if context_parts else "Aucun contexte spécifique"
-        
-        # Messages
+        # Messages - l'agenda est déjà inclus dans le system prompt
         messages = [
-            {"role": "system", "content": self.get_system_prompt()},
-            {"role": "system", "content": f"Contexte actuel: {context}"}
+            {"role": "system", "content": self.get_system_prompt(schedule_context)},
         ]
+        if vision_context:
+            messages.append({"role": "system", "content": f"Contexte vision: {vision_context}"})
         
         # Ajouter historique
         messages.extend(self.conversation_history[-self.max_history:])
