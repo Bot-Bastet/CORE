@@ -8,6 +8,7 @@ import threading
 import time
 import os
 import numpy as np
+import subprocess
 from ultralytics import YOLO
 import face_recognition
 
@@ -134,6 +135,27 @@ class VisionSystem(threading.Thread):
         self.ready = True
         print(f"✓ Vision démarrée - Caméra {self.camera_id} @ {self.yolo_resolution[0]}x{self.yolo_resolution[1]}")
         
+        # --- Configurer le stream RTSP via ffmpeg ---
+        rtsp_url = self.config.get("rtsp_stream_url", "rtsp://bastet.arthonetwork.fr:8554/cam1")
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f"{self.yolo_resolution[0]}x{self.yolo_resolution[1]}",
+            '-r', str(self.yolo_fps),
+            '-i', '-',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+            '-preset', 'ultrafast', '-tune', 'zerolatency',
+            '-f', 'rtsp', rtsp_url
+        ]
+        ffmpeg_proc = None
+        try:
+            ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            print(f"✓ Streaming RTSP en cours vers {rtsp_url}")
+        except Exception as e:
+            print(f"⚠ Impossible de démarrer le stream RTSP (ffmpeg manquant ?): {e}")
+        # ---------------------------------------------
+        
         last_valid_faces = []
         last_valid_time = 0
         
@@ -153,8 +175,16 @@ class VisionSystem(threading.Thread):
 
             ret, frame = self.cap.read()
             if not ret:
-                time.sleep(1)
+                time.sleep(0.1)
                 continue
+
+            # -- Envoi de la frame brute vers le stream RTSP --
+            if ffmpeg_proc and ffmpeg_proc.stdin:
+                try:
+                    ffmpeg_proc.stdin.write(frame.tobytes())
+                except Exception:
+                    pass  # Ignorer silently si le pipe casse temporairement
+            # -------------------------------------------------
 
             # Resize pour face recognition (plus rapide)
             scale = self.face_resolution[0] / self.yolo_resolution[0]
@@ -206,10 +236,17 @@ class VisionSystem(threading.Thread):
                 time.sleep(0.5)
                 continue
 
-            time.sleep(0.1)
+            time.sleep(0.01) # Low latency loop sleep
 
+        # Nettoyage à la sortie
         if self.cap:
             self.cap.release()
+        if ffmpeg_proc:
+            try:
+                ffmpeg_proc.stdin.close()
+                ffmpeg_proc.terminate()
+            except:
+                pass
 
     def stop(self):
         self.running = False
