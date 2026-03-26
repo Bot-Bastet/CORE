@@ -128,11 +128,15 @@ RÈGLES STRICTES:
             # --- Check and send UDP Commands ---
             cmd_match = re.search(r'\[CMD:\s*(.*?)\]', response, re.IGNORECASE)
             if cmd_match:
-                cmd = cmd_match.group(1).strip()
+                cmd = cmd_match.group(1).strip().upper()
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.sendto(cmd.encode('utf-8'), ('127.0.0.1', 5005))
-                    print(f"🤖 [COMMANDE ENVOYÉE AU ROBOT] : {cmd}")
+                    # Envoyer plusieurs fois pour garantir la reception dans la boucle 240Hz
+                    for _ in range(5):
+                        sock.sendto(cmd.encode('utf-8'), ('127.0.0.1', 5005))
+                        import time as _t; _t.sleep(0.01)
+                    sock.close()
+                    print(f"[ROBOT] Commande envoyee : {cmd}")
                 except Exception as e:
                     print(f"Erreur envoi commande UDP: {e}")
                 
