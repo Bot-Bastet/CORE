@@ -89,6 +89,7 @@ RÈGLES STRICTES:
 - Les SEULES actions autorisées sont : `[CMD: avancer]`, `[CMD: stop]`
 - N'invente jamais d'autres tags (ex: pas de `[Bouge vers...]`). Reste strictement sur `[CMD: avancer]`.
 - Utilise UNIQUEMENT l'agenda ci-dessus pour le planning. Ne devin JAMAIS.
+- Ne dis JAMAIS "Selon l'agenda" ou "D'après l'API". Parle naturellement comme si tu connaissais l'emploi du temps de la personne de tête. (Ex: "Demain tu as cours de Unity à 9h45").
 - Sois TRÈS CONCISE (1-2 phrases max)
 - Pas de formules de politesse excessives."""
 

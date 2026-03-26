@@ -50,14 +50,30 @@ class VisionSystem(threading.Thread):
     def sync_faces_from_remote(self):
         """Télécharge les visages depuis le serveur distant."""
         import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         try:
             print(f"🔄 Syncing faces from {self.remote_url}...")
-            resp = requests.get(f"{self.remote_url}/vault/faces", timeout=5)
+            token = self.config.get("gateway_token", "tealo")
+            headers = {"X-API-Token": token}
+            
+            resp = requests.get(f"{self.remote_url}/faces", headers=headers, verify=False, timeout=5)
             if resp.status_code == 200:
                 faces = resp.json()
+                faces_dir = os.path.join(os.path.dirname(__file__), "..", "known_faces")
+                os.makedirs(faces_dir, exist_ok=True)
+                
                 for face in faces:
-                    # Simulation: on log juste car on n'a pas encore le endpoint download binaire en place
-                    print(f"   -> Found remote face for: {face['username']}")
+                    face_id = face.get('id')
+                    face_name = face.get('name')
+                    # Télécharger l'image binaire
+                    img_resp = requests.get(f"{self.remote_url}/faces/{face_id}/image", headers=headers, verify=False, timeout=10)
+                    if img_resp.status_code == 200:
+                        path_img = os.path.join(faces_dir, f"{face_name}.jpg")
+                        with open(path_img, 'wb') as f:
+                            f.write(img_resp.content)
+                        print(f"   -> Téléchargé: {face_name}")
             print("✅ Face Sync Complete")
         except Exception as e:
             print(f"⚠️ Face Sync Failed: {e}")

@@ -22,10 +22,34 @@ class MyGesIntegration:
 
     def get_credentials(self):
         """
-        Try to retrieve stored credentials.
+        Try to retrieve stored credentials (Gateway first, then local).
         Returns (username, password) or (None, None).
-        Also loads full_name and grade if available.
         """
+        # 1. Tenter de récupérer depuis la Bastet Gateway
+        try:
+            import requests
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # TODO: Idéalement lire la config globale importée, mais pour ce module :
+            gateway_token = "tealo"
+            gateway_url = "https://bastet.arthonetwork.fr:8000"
+            
+            headers = {"X-API-Token": gateway_token}
+            resp = requests.get(f"{gateway_url}/myges", headers=headers, verify=False, timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                cloud_user = data.get("username")
+                cloud_pwd = data.get("password")
+                if cloud_user and cloud_pwd:
+                    print(f"MyGes: Identifiants Cloud récupérés avec succès pour {cloud_user}")
+                    self.full_name = cloud_user.split('.')[0].capitalize()  # fallback name 
+                    self.grade = ""
+                    return cloud_user, cloud_pwd
+        except Exception as e:
+            print(f"MyGes: Serveur Gateway injoignable pour les identifiants ({e}).")
+
+        # 2. Fallback sur le local
         try:
             import os
             import json

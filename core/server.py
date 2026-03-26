@@ -109,6 +109,54 @@ def load_config():
         }
 
 
+async def publish_state_loop():
+    """Publie l'état du robot vers l'API Gateway toutes les 3 secondes."""
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    url = "https://bastet.arthonetwork.fr:8000/core/state"
+    headers = {"X-API-Token": "tealo", "Content-Type": "application/json"}
+    
+    def post_sync(data):
+        try:
+            requests.post(url, json=data, headers=headers, verify=False, timeout=2)
+        except:
+            pass
+            
+    while True:
+        try:
+            await asyncio.sleep(3)
+            
+            # Construire le payload
+            vision_ctx = state.shared_data.get('vision_context', {})
+            seen_person = ""
+            if vision_ctx.get("faces_names"):
+                seen_person = vision_ctx["faces_names"][0]
+            
+            seen_objects = vision_ctx.get("objects", [])
+            last_chat = []
+            if hasattr(state, 'ai_agent') and getattr(state, 'ai_agent', None):
+                last_chat = getattr(state.ai_agent, 'conversation_history', [])[-5:]
+                
+            robot_status = "idle"
+            if state.shared_data.get("is_speaking"):
+                robot_status = "speaking"
+            elif state.shared_data.get("is_listening"):
+                robot_status = "listening"
+                
+            payload = {
+                "seen_person": seen_person,
+                "seen_objects": seen_objects,
+                "last_chat": last_chat,
+                "robot_status": robot_status
+            }
+            
+            await asyncio.to_thread(post_sync, payload)
+        except Exception:
+            pass
+
+
 @app.on_event("startup")
 async def startup_event():
     print("\n" + "="*50)
@@ -118,6 +166,7 @@ async def startup_event():
     state.config = load_config()
     threading.Thread(target=boot_system, daemon=True).start()
     asyncio.create_task(monitor_loop())
+    asyncio.create_task(publish_state_loop())
 
 
 def boot_system():

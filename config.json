@@ -1,5 +1,7 @@
 {
-    "ai_provider": "lmstudio",
+    "ai_provider": "nvidia_nim",
+    "nvidia_nim_api_key": "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",
+    "nim_model": "meta/llama3-8b-instruct",
     "lm_studio_url": "http://192.168.0.57:1234/v1",
     "yolo_model": "yolov8n.pt",
     "camera_id": 0,
