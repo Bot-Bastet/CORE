@@ -308,7 +308,8 @@ void setup()
     BR_sensor.Initialize(A6, 14);
 
     // IMU
-    imu_sensor.Initialize();
+    // Bypassed on Arduino Mega: BNO08x connects directly to Raspberry Pi 5
+    // imu_sensor.Initialize();
 
     // NOTE: See top of file for spot_mode explanation:
     if (spot_mode == STRAIGHT_LEGS)
@@ -341,7 +342,8 @@ void loop()
   {
     ros_serial.publishContacts(FL_sensor.isTriggered(), FR_sensor.isTriggered(), BL_sensor.isTriggered(), BR_sensor.isTriggered());
 
-    //IMU
+    // IMU reporting bypassed on Arduino Mega (directly published by Raspberry Pi 5 sensor_interface)
+    /*
     if (imu_sensor.available())
     {
       imu::Vector<3> eul = imu_sensor.GetEuler();
@@ -350,6 +352,7 @@ void loop()
 
       ros_serial.publishIMU(eul, acc, gyro);
     }
+    */
 
     prev_publish_time = micros();
   }
