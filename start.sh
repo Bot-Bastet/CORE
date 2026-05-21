@@ -38,12 +38,8 @@ ros2 run tf2_ros static_transform_publisher \
 echo "[SpotBot] TF OK" | tee -a $LOG/startup.log
 sleep 3
 
-# 3. SLAM
-ros2 run rtabmap_slam rtabmap --ros-args \
-  -r __node:=rtabmap \
-  --params-file /opt/spotbot/config/rtabmap_params.yaml \
-  -r rgb/image:=/camera/image_raw -r rgb/camera_info:=/camera/camera_info \
-  >> $LOG/rtabmap.log 2>&1 &
+# 3. SLAM (ORB-SLAM3)
+/home/tealo/ros2_ws/run_slam.sh >> $LOG/orbslam3.log 2>&1 &
 echo "[SpotBot] SLAM OK" | tee -a $LOG/startup.log
 sleep 2
 
