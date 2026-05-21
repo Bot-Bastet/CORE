@@ -23,10 +23,11 @@ Une commande unifiée a été créée pour simplifier l'usage quotidien :
 - `spotbot stop`    : Arrête tous les processus ROS 2.
 - `spotbot status`  : Affiche la température, RAM et les nodes actifs.
 - `spotbot logs`    : Visualise le flux de données en temps réel.
+- `~/ros2_ws/run_slam.sh` : Lance le nœud de cartographie 3D (ORB-SLAM3). Il détecte automatiquement s'il faut lancer la version Mono (1 caméra) ou Stéréo (2 caméras).
 
 ## 📺 Interface de Debug
 Accédez au dashboard en direct depuis n'importe quel appareil sur le même réseau :
-👉 **http://192.168.0.51:8888**
+👉 **http://[IP_DU_PI]:8888**
 
 ## 📂 Structure du Workspace
 - `spotbot_arduino_bridge` : Pont USB Serial entre Pi 5 et Arduino.
@@ -34,6 +35,7 @@ Accédez au dashboard en direct depuis n'importe quel appareil sur le même rés
 - `spotbot_streaming`      : Gestion du flux vidéo et WiFi.
 - `spotbot_description`    : Modèle 3D (URDF) du robot.
 - `spotbot_bringup`        : Launchers principaux du système.
+- `ORB_SLAM3_ROS2`         : Nœud personnalisé de V-SLAM (Mono/Stéréo) diffusant TF, Pose et Nuage de Points.
 
 ---
 Projet développé avec ❤️ pour la robotique quadrupède.
