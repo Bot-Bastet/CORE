@@ -329,11 +329,15 @@ avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 \
 
 > ### 📥 Liens de Téléchargement Direct :
 > 
-> * 🌐 **Sur Thingiverse :**
+> * ⚡ **PACK D'IMPRESSION PRÊT À L'EMPLOI (RECOMMANDÉ) :**
+>   * **[Télécharger le SPOTBOT READY-TO-PRINT PACK (ZIP)](https://github.com/Bot-Bastet/CORE/raw/main/references/spotbot_ready_to_print_pack.zip)** 🚀
+>   * *Ce pack unique contient toutes les pièces requises aux bonnes quantités (ex: 4x pieds, 4x épaules, etc.) pré-triées pour votre setup (Mega + micro-servos). Vous avez juste à tout extraire et à le glisser directement dans votre slicer (Cura, PrusaSlicer...) pour lancer l'impression d'un coup !*
+> 
+> * 🌐 **Sur Thingiverse (Archives complètes d'origine) :**
 >   * [Télécharger l'archive complète ZIP de Thingiverse](https://www.thingiverse.com/thing:3445283/zip)
 >   * [Voir et télécharger les fichiers STL individuellement sur Thingiverse](https://www.thingiverse.com/thing:3445283/files)
 >
-> * 📦 **Sauvegardés dans votre propre dépôt GitHub (Téléchargement direct rapide) :**
+> * 📦 **Sauvegardés dans votre propre dépôt GitHub (Archives brutes) :**
 >   * [Télécharger l'Archive STL - Part 1 sur 2](https://github.com/Bot-Bastet/CORE/raw/main/references/Spotmicro%20-%20robot%20dog%20-%203445283%20-%20part%201%20of%202.zip)
 >   * [Télécharger l'Archive STL - Part 2 sur 2](https://github.com/Bot-Bastet/CORE/raw/main/references/Spotmicro%20-%20robot%20dog%20-%203445283%20-%20part%202%20of%202.zip)
 
@@ -346,52 +350,52 @@ avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 \
 ### 1. Châssis principal (Main Frame & Covers)
 Ces pièces forment le corps central du SpotBot et abritent le Raspberry Pi 5, l'Arduino Mega, l'IMU BNO08x, le capteur ultrason HC-SR04 et l'alimentation.
 
-| Fichier STL | Quantité | Rôle / Description | Recommandation Arduino Mega |
-|-------------|:--------:|--------------------|-----------------------------|
-| `plate.stl` | 1 | Plaque de base / Support central principal | Standard |
-| `L_side_plate.stl` | 1 | Flanc gauche du robot (espace élargi pour Mega) | **Version Spécifique Mega** |
-| `R_side_plate.stl` | 1 | Flanc droit du robot (espace élargi pour Mega) | **Version Spécifique Mega** |
-| `F_cover.stl` | 1 | Capot avant (tête / support caméra standard) | Standard |
-| `R_cover.stl` | 1 | Capot arrière | Standard |
-| `T_cover_mg.stl` | 1 | Capot supérieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** |
-| `B_cover_mg.stl` | 1 | Capot inférieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** |
+| Fichier STL | Quantité | Rôle / Description | Recommandation Arduino Mega | Téléchargement Direct |
+|-------------|:--------:|--------------------|-----------------------------|:---------------------:|
+| `plate.stl` | 1 | Plaque de base / Support central principal | Standard | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/plate.stl) |
+| `L_side_plate.stl` | 1 | Flanc gauche du robot (espace élargi pour Mega) | **Version Spécifique Mega** | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_side_plate.stl) |
+| `R_side_plate.stl` | 1 | Flanc droit du robot (espace élargi pour Mega) | **Version Spécifique Mega** | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_side_plate.stl) |
+| `F_cover.stl` | 1 | Capot avant (tête / support caméra standard) | Standard | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/F_cover.stl) |
+| `R_cover.stl` | 1 | Capot arrière | Standard | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_cover.stl) |
+| `T_cover_mg.stl` | 1 | Capot supérieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/T_cover_mg.stl) |
+| `B_cover_mg.stl` | 1 | Capot inférieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/B_cover_mg.stl) |
 
 ---
 
 ### 2. Épaules (Shoulders)
 Ces pièces réalisent l'articulation de la hanche (Abduction / Adduction) pour chaque patte.
 
-| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
-|-------------|:--------:|--------------------|--------------------|
-| `I_shoulder_mg.stl` | 4 | Épaule interne (Inner Shoulder) | **Version `_mg`** indispensable pour MG90S/SG90 |
-| `O_shoulder.stl` | 4 | Épaule externe (Outer Shoulder) | Standard (identique pour toutes les hanches) |
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage | Téléchargement Direct |
+|-------------|:--------:|--------------------|--------------------|:---------------------:|
+| `I_shoulder_mg.stl` | 4 | Épaule interne (Inner Shoulder) | **Version `_mg`** indispensable pour MG90S/SG90 | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/I_shoulder_mg.stl) |
+| `O_shoulder.stl` | 4 | Épaule externe (Outer Shoulder) | Standard (identique pour toutes les hanches) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/O_shoulder.stl) |
 
 ---
 
 ### 3. Bras et Articulations (Limbs)
 Ces pièces constituent les membres mobiles (cuisse, tibia, pied) pour les pattes gauches et droites.
 
-| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
-|-------------|:--------:|--------------------|--------------------|
-| `L_arm_joint_mg.stl` | 2 | Articulation supérieure gauche | **Version `_mg`** (Pattes FL et BL) |
-| `R_arm_joint_mg.stl` | 2 | Articulation supérieure droite | **Version `_mg`** (Pattes FR and BR) |
-| `L_arm_mg.stl` | 2 | Bras gauche (Upper arm / Cuisse) | **Version `_mg`** (Pattes FL et BL) |
-| `R_arm_mg.stl` | 2 | Bras droit (Upper arm / Cuisse) | **Version `_mg`** (Pattes FR and BR) |
-| `L_arm_cover.stl` | 2 | Cache / Capot de protection bras gauche | Standard (Pattes FL et BL) |
-| `R_arm_cover.stl` | 2 | Cache / Capot de protection bras droit | Standard (Pattes FR and BR) |
-| `L_wrist_mg.stl` | 2 | Poignet/Tibia gauche (Lower arm / Wrist) | **Version `_mg`** (Pattes FL et BL) |
-| `R_wrist_mg.stl` | 2 | Poignet/Tibia droit (Lower arm / Wrist) | **Version `_mg`** (Pattes FR and BR) |
-| `foot.stl` | 4 | Embout de pied | À imprimer en **TPU (Flexible)** si possible |
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage | Téléchargement Direct |
+|-------------|:--------:|--------------------|--------------------|:---------------------:|
+| `L_arm_joint_mg.stl` | 2 | Articulation supérieure gauche | **Version `_mg`** (Pattes FL et BL) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_arm_joint_mg.stl) |
+| `R_arm_joint_mg.stl` | 2 | Articulation supérieure droite | **Version `_mg`** (Pattes FR and BR) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_arm_joint_mg.stl) |
+| `L_arm_mg.stl` | 2 | Bras gauche (Upper arm / Cuisse) | **Version `_mg`** (Pattes FL et BL) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_arm_mg.stl) |
+| `R_arm_mg.stl` | 2 | Bras droit (Upper arm / Cuisse) | **Version `_mg`** (Pattes FR and BR) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_arm_mg.stl) |
+| `L_arm_cover.stl` | 2 | Cache / Capot de protection bras gauche | Standard (Pattes FL et BL) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_arm_cover.stl) |
+| `R_arm_cover.stl` | 2 | Cache / Capot de protection bras droit | Standard (Pattes FR and BR) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_arm_cover.stl) |
+| `L_wrist_mg.stl` | 2 | Poignet/Tibia gauche (Lower arm / Wrist) | **Version `_mg`** (Pattes FL et BL) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_wrist_mg.stl) |
+| `R_wrist_mg.stl` | 2 | Poignet/Tibia droit (Lower arm / Wrist) | **Version `_mg`** (Pattes FR and BR) | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_wrist_mg.stl) |
+| `foot.stl` | 4 | Embout de pied | À imprimer en **TPU (Flexible)** si possible | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/foot.stl) |
 
 ---
 
 ### 4. Supports de Capteurs (Sensors Mounts)
 Pièces optionnelles mais fortement recommandées pour intégrer proprement le capteur de distance.
 
-| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
-|-------------|:--------:|--------------------|--------------------|
-| `L_ultra_sonic.stl` | 1 | Support gauche pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` |
-| `R_ultra_sonic.stl` | 1 | Support droit pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` |
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage | Téléchargement Direct |
+|-------------|:--------:|--------------------|--------------------|:---------------------:|
+| `L_ultra_sonic.stl` | 1 | Support gauche pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/L_ultra_sonic.stl) |
+| `R_ultra_sonic.stl` | 1 | Support droit pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` | [Télécharger ⬇️](https://github.com/Bot-Bastet/CORE/raw/main/references/stl_individual/R_ultra_sonic.stl) |
 
 ---
 
