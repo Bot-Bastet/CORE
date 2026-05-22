@@ -2,10 +2,13 @@
 source /opt/ros2_jazzy/install/setup.bash
 source /home/tealo/ros2_ws/install/setup.bash
 
-# Count number of video devices (ignoring media devices)
-CAM_COUNT=$(ls -1 /dev/video* 2>/dev/null | grep -v media | wc -l)
+# Ensure ORB-SLAM3 libraries are found
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/tealo/ORB_SLAM3/lib:/home/tealo/ORB_SLAM3/Thirdparty/DBoW2/lib:/home/tealo/ORB_SLAM3/Thirdparty/g2o/lib
 
-echo "Detected $CAM_COUNT camera(s)."
+# Count number of real USB video devices
+CAM_COUNT=$(v4l2-ctl --list-devices | grep -i "usb" | wc -l)
+
+echo "Detected $CAM_COUNT USB camera(s)."
 
 if [ "$CAM_COUNT" -ge 2 ]; then
     echo "Launching STEREO SLAM..."
