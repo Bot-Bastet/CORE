@@ -15,5 +15,5 @@ if [ "$CAM_COUNT" -ge 2 ]; then
     ros2 run orbslam3 stereo /home/tealo/ORB_SLAM3/Vocabulary/ORBvoc.txt /home/tealo/ORB_SLAM3/Examples/Stereo/EuRoC.yaml true
 else
     echo "Launching MONOCULAR SLAM..."
-    ros2 run orbslam3 mono /home/tealo/ORB_SLAM3/Vocabulary/ORBvoc.txt /home/tealo/ORB_SLAM3/Examples/Monocular/EuRoC.yaml
+    ros2 run orbslam3 mono /home/tealo/ORB_SLAM3/Vocabulary/ORBvoc.txt /home/tealo/ORB_SLAM3/Examples/Monocular/EuRoC.yaml --ros-args -r camera:=/camera/image_raw
 fi
