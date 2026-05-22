@@ -327,6 +327,16 @@ avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 \
 
 ## Liste complète des Modèles 3D à imprimer
 
+> ### 📥 Liens de Téléchargement Direct :
+> 
+> * 🌐 **Sur Thingiverse :**
+>   * [Télécharger l'archive complète ZIP de Thingiverse](https://www.thingiverse.com/thing:3445283/zip)
+>   * [Voir et télécharger les fichiers STL individuellement sur Thingiverse](https://www.thingiverse.com/thing:3445283/files)
+>
+> * 📦 **Sauvegardés dans votre propre dépôt GitHub (Téléchargement direct rapide) :**
+>   * [Télécharger l'Archive STL - Part 1 sur 2](https://github.com/Bot-Bastet/CORE/raw/main/references/Spotmicro%20-%20robot%20dog%20-%203445283%20-%20part%201%20of%202.zip)
+>   * [Télécharger l'Archive STL - Part 2 sur 2](https://github.com/Bot-Bastet/CORE/raw/main/references/Spotmicro%20-%20robot%20dog%20-%203445283%20-%20part%202%20of%202.zip)
+
 > **💡 Note de conception importante :** Ce robot est basé sur le design **Spotmicro de KDY0523** (référence Thingiverse [3445283](https://www.thingiverse.com/thing:3445283)).
 >
 > ⚠️ **IMPORTANT :** Pour notre configuration spécifique (10 servos MG90S + 2 SG90 et Arduino Mega 2560) :
