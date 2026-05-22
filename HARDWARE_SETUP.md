@@ -8,8 +8,8 @@
 |-----------|----------|:---------:|-------|
 | Raspberry Pi 5 (8 Go min) | 1 | | + carte SD 64 Go min (classe A2) |
 | Arduino Mega 2560 | 1 | | Clone compatible OK |
-| Servo MG996R | 12 | | Alimentés EN EXTERNE (pas depuis Arduino) |
-| MPU6050 (module GY-521) | 1 | | Gyroscope + Accéléromètre I2C |
+| Servos MG90S & SG90 | 12 | | **10 MG90S** (pignons métal) + **2 SG90** (plastique) alimentés EN EXTERNE |
+| **BNO08x** (IMU principale) | 1 | | Capteur absolu 9-DOF I2C (quaternions fusionnés à bord) |
 | **HC-SR04** (capteur ultrason) | 1 | ✅ Optionnel | Détection d'obstacles < 400 cm |
 | Caméra USB (mono) | 1 ou 2 | | 1 = mono SLAM, 2 = stéréo SLAM |
 | **Module WiFi Alfa USB** | 1 | ✅ Optionnel | AWUS036ACH ou similaire — basculement WiFi |
@@ -22,9 +22,12 @@
 
 ## Schéma de câblage
 
-### 1. Servos MG996R → Arduino Mega
+### 1. Configuration des Servos (10x MG90S & 2x SG90) → Arduino Mega
 
-> **⚠️ CRITIQUE** : Les 12 servos consomment jusqu'à 30A en pointe. Utilisez une alimentation externe dédiée 5V/10A minimum. Ne jamais alimenter les servos via la broche 5V de l'Arduino.
+> **⚠️ CRITIQUE** : Les 12 servos consomment de forts pics de courant en pointe. Utilisez une alimentation externe dédiée 5-6V / 10A minimum. Ne jamais alimenter les servos via le 5V de l'Arduino.
+> **Répartition des servos** :
+> - **10 MG90S (pignons métal)** : Recommandés pour les articulations supportant le poids et la force (Knee/Elbow, Lower/Tibia, Upper/Cuisse, et Hip/Abad des pattes avant).
+> - **2 SG90 (pignons plastique)** : Réservés aux hanches arrières (`BL Abad` et `BR Abad` - PIN D8 et D11), qui subissent le moins de charge dynamique.
 
 ```
 Alimentation Externe 5-6V/10A
@@ -34,41 +37,41 @@ Alimentation Externe 5-6V/10A
                     └──────────────── GND Arduino Mega (PIN GND)
 ```
 
-| Servo | Description    | PIN Arduino | Fil Signal |
-|-------|----------------|-------------|-----------|
-| 0     | FR Abad        | **D2**      | Jaune/Blanc |
-| 1     | FR Upper (cuisse) | **D3**  | Jaune/Blanc |
-| 2     | FR Lower (tibia) | **D4**   | Jaune/Blanc |
-| 3     | FL Abad        | **D5**      | Jaune/Blanc |
-| 4     | FL Upper       | **D6**      | Jaune/Blanc |
-| 5     | FL Lower       | **D7**      | Jaune/Blanc |
-| 6     | BR Abad        | **D8**      | Jaune/Blanc |
-| 7     | BR Upper       | **D9**      | Jaune/Blanc |
-| 8     | BR Lower       | **D10**     | Jaune/Blanc |
-| 9     | BL Abad        | **D11**     | Jaune/Blanc |
-| 10    | BL Upper       | **D12**     | Jaune/Blanc |
-| 11    | BL Lower       | **D13**     | Jaune/Blanc |
+| Servo | Articulation / Patte | PIN Arduino | Modèle Recommandé |
+|-------|----------------------|-------------|-------------------|
+| 0     | FR Abad (Hanche)     | **D2**      | **MG90S** (Métal) |
+| 1     | FR Upper (Cuisse)    | **D3**      | **MG90S** (Métal) |
+| 2     | FR Lower (Tibia)     | **D4**      | **MG90S** (Métal) |
+| 3     | FL Abad (Hanche)     | **D5**      | **MG90S** (Métal) |
+| 4     | FL Upper (Cuisse)    | **D6**      | **MG90S** (Métal) |
+| 5     | FL Lower (Tibia)     | **D7**      | **MG90S** (Métal) |
+| 6     | BR Abad (Hanche)     | **D8**      | **SG90** (Plastique) |
+| 7     | BR Upper (Cuisse)    | **D9**      | **MG90S** (Métal) |
+| 8     | BR Lower (Tibia)     | **D10**     | **MG90S** (Métal) |
+| 9     | BL Abad (Hanche)     | **D11**     | **SG90** (Plastique) |
+| 10    | BL Upper (Cuisse)    | **D12**     | **MG90S** (Métal) |
+| 11    | BL Lower (Tibia)     | **D13**     | **MG90S** (Métal) |
 
-> Chaque servo : 3 fils — **Marron=GND, Rouge=VCC(alim externe), Jaune/Blanc=Signal(Arduino)**
+> Chaque servo : 3 fils — **Marron/Noir=GND, Rouge=VCC (alim externe), Jaune/Orange/Blanc=Signal (Arduino)**
 
 ---
 
-### 2. BNO085 → Arduino Mega *(IMU PRINCIPAL — remplace le MPU6050)*
+### 2. BNO08x (BNO080/BNO085) → Arduino Mega *(IMU UNIQUE & PRINCIPALE)*
 
-> **Le BNO085 est fortement recommandé.** Il intègre sa propre fusion gyro+accél+magnétomètre et retourne directement des **quaternions calibrés** — pas besoin de filtre Madgwick côté ROS. Le SLAM rtabmap sera bien plus précis.
+> **Le BNO08x est la seule IMU à utiliser (oubliez le MPU6050).** Il intègre sa propre fusion gyro+accél+magnétomètre (processeur ARM Cortex-M0+ SH-2 intégré) et calcule directement des **quaternions calibrés**. Le filtre complémentaire n'est pas nécessaire côté ROS, et la stabilité du SLAM rtabmap est grandement accrue.
 
-| Broche BNO085 | → | Broche Arduino Mega | Notes |
+| Broche BNO08x | → | Broche Arduino Mega | Notes |
 |:---:|:---:|:---:|---|
-| VCC | → | **3.3V** | ⚠️ La plupart des breakouts supportent 3.3V et 5V |
+| VCC | → | **3.3V** | Alimentation stable en 3.3V |
 | GND | → | **GND** | Masse commune |
-| SDA | → | **PIN 20 (SDA)** | Bus I2C partagé avec MPU6050 |
-| SCL | → | **PIN 21 (SCL)** | Bus I2C partagé avec MPU6050 |
-| INT | → | **D18** | Interruption — améliore la performance (optionnel mais recommandé) |
-| RST | → | **D19** | Reset hardware — permet de relancer le BNO085 sans reboot Arduino |
-| PS0 | → | **GND** | Sélection protocole I2C (PS0=0, PS1=0 → adresse 0x4A) |
-| PS1 | → | **GND** | *(si non connecté, pull-down interne suffit sur la plupart des breakouts)* |
+| SDA | → | **PIN 20 (SDA)** | Ligne de données I2C (Mega) |
+| SCL | → | **PIN 21 (SCL)** | Ligne d'horloge I2C (Mega) |
+| INT | → | **D18** | Interruption de données (recommandé) |
+| RST | → | **D19** | Reset matériel (permet le reset via firmware) |
+| PS0 | → | **GND** | Configuration mode I2C (adresse 0x4A) |
+| PS1 | → | **GND** | Configuration mode I2C (adresse 0x4A) |
 
-> **Adresse I2C : 0x4A** (PS0=GND, PS1=GND) — pas de conflit avec MPU6050 (0x68)
+> **Adresse I2C : 0x4A** (PS0=GND, PS1=GND). Le MPU6050 est totalement absent de ce câblage.
 
 **Breakouts compatibles :**
 | Référence | MCU | Lien |
@@ -200,20 +203,20 @@ ros2 topic echo /wifi/alfa_active # std_msgs/Bool  (True = Alfa utilisé)
 ┌─────────────────────────────────────────────────────────┐
 │                   ARDUINO MEGA 2560                      │
 │                                                          │
-│  D2 ──► Servo 0  (FR Abad)    │ I2C SDA (20) ◄── MPU6050│
-│  D3 ──► Servo 1  (FR Upper)   │ I2C SCL (21) ◄── MPU6050│
-│  D4 ──► Servo 2  (FR Lower)   │                          │
-│  D5 ──► Servo 3  (FL Abad)    │                          │
-│  D6 ──► Servo 4  (FL Upper)   │                          │
-│  D7 ──► Servo 5  (FL Lower)   │                          │
-│  D8 ──► Servo 6  (BR Abad)    │                          │
-│  D9 ──► Servo 7  (BR Upper)   │                          │
-│  D10──► Servo 8  (BR Lower)   │                          │
-│  D11──► Servo 9  (BL Abad)    │                          │
-│  D12──► Servo 10 (BL Upper)   │                          │
-│  D13──► Servo 11 (BL Lower)   │                          │
+│  D2 ──► Servo 0  (FR Abad MG90S) │ I2C SDA(20) ◄─ BNO08x │
+│  D3 ──► Servo 1  (FR Upper MG90S)│ I2C SCL(21) ◄─ BNO08x │
+│  D4 ──► Servo 2  (FR Lower MG90S)│                       │
+│  D5 ──► Servo 3  (FL Abad MG90S) │ D18 (INT)  ◄── BNO08x │
+│  D6 ──► Servo 4  (FL Upper MG90S)│ D19 (RST)  ──► BNO08x │
+│  D7 ──► Servo 5  (FL Lower MG90S)│                       │
+│  D8 ──► Servo 6  (BR Abad SG90)  │                       │
+│  D9 ──► Servo 7  (BR Upper MG90S)│                       │
+│  D10──► Servo 8  (BR Lower MG90S)│                       │
+│  D11──► Servo 9  (BL Abad SG90)  │                       │
+│  D12──► Servo 10 (BL Upper MG90S)│                       │
+│  D13──► Servo 11 (BL Lower MG90S)│                       │
 │                                                          │
-│  GND ◄────────────── GND commun servos + MPU6050         │
+│  GND ◄────────────── GND commun servos + BNO08x          │
 └─────────────────────────────────────────────────────────┘
                          │
           ┌──────────────┘
@@ -239,7 +242,7 @@ ros2 topic echo /wifi/alfa_active # std_msgs/Bool  (True = Alfa utilisé)
 - [ ] VCC servos branché sur **alimentation externe 6V** (JAMAIS Arduino 5V)
 - [ ] Condensateurs 1000µF sur bornes alim servos (anti-pics courant)
 - [ ] Tous les fils signal servos sur les bonnes pins (D2 à D13)
-- [ ] MPU6050 : SDA→PIN20, SCL→PIN21, VCC→3.3V, GND→GND
+- [ ] BNO08x : SDA→PIN20, SCL→PIN21, VCC→3.3V, GND→GND, INT→D18, RST→D19
 - [ ] Câble USB Pi5↔Arduino branché
 - [ ] Alimentation Pi 5 branchée séparément (USB-C 5V/5A)
 
@@ -319,3 +322,77 @@ python3 ros2_ws/src/spotbot_arduino_bridge/spotbot_arduino_bridge/arduino_flashe
 avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 \
     -U flash:w:spotbot_controller.hex:i
 ```
+
+---
+
+## Liste complète des Modèles 3D à imprimer
+
+> **💡 Note de conception importante :** Ce robot est basé sur le design **Spotmicro de KDY0523** (référence Thingiverse [3445283](https://www.thingiverse.com/thing:3445283)).
+>
+> ⚠️ **IMPORTANT :** Pour notre configuration spécifique (10 servos MG90S + 2 SG90 et Arduino Mega 2560) :
+> 1. Vous **devez absolument** utiliser les fichiers comportant le suffixe **`_mg` (Micro Gear)**. Ces fichiers sont modifiés pour s'adapter à la taille des micro-servos (MG90S/SG90). N'imprimez pas les versions standard prévues pour les gros servos MG996R.
+> 2. Vous **devez** imprimer les plaques et capots conçus pour l'**Arduino Mega** afin d'avoir l'espace nécessaire à l'intérieur du châssis. N'imprimez pas les pièces estampillées `non-mega`.
+
+### 1. Châssis principal (Main Frame & Covers)
+Ces pièces forment le corps central du SpotBot et abritent le Raspberry Pi 5, l'Arduino Mega, l'IMU BNO08x, le capteur ultrason HC-SR04 et l'alimentation.
+
+| Fichier STL | Quantité | Rôle / Description | Recommandation Arduino Mega |
+|-------------|:--------:|--------------------|-----------------------------|
+| `plate.stl` | 1 | Plaque de base / Support central principal | Standard |
+| `L_side_plate.stl` | 1 | Flanc gauche du robot (espace élargi pour Mega) | **Version Spécifique Mega** |
+| `R_side_plate.stl` | 1 | Flanc droit du robot (espace élargi pour Mega) | **Version Spécifique Mega** |
+| `F_cover.stl` | 1 | Capot avant (tête / support caméra standard) | Standard |
+| `R_cover.stl` | 1 | Capot arrière | Standard |
+| `T_cover_mg.stl` | 1 | Capot supérieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** |
+| `B_cover_mg.stl` | 1 | Capot inférieur (adapté micro-servos & Mega) | **Version Spécifique Mega + `_mg`** |
+
+---
+
+### 2. Épaules (Shoulders)
+Ces pièces réalisent l'articulation de la hanche (Abduction / Adduction) pour chaque patte.
+
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
+|-------------|:--------:|--------------------|--------------------|
+| `I_shoulder_mg.stl` | 4 | Épaule interne (Inner Shoulder) | **Version `_mg`** indispensable pour MG90S/SG90 |
+| `O_shoulder.stl` | 4 | Épaule externe (Outer Shoulder) | Standard (identique pour toutes les hanches) |
+
+---
+
+### 3. Bras et Articulations (Limbs)
+Ces pièces constituent les membres mobiles (cuisse, tibia, pied) pour les pattes gauches et droites.
+
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
+|-------------|:--------:|--------------------|--------------------|
+| `L_arm_joint_mg.stl` | 2 | Articulation supérieure gauche | **Version `_mg`** (Pattes FL et BL) |
+| `R_arm_joint_mg.stl` | 2 | Articulation supérieure droite | **Version `_mg`** (Pattes FR and BR) |
+| `L_arm_mg.stl` | 2 | Bras gauche (Upper arm / Cuisse) | **Version `_mg`** (Pattes FL et BL) |
+| `R_arm_mg.stl` | 2 | Bras droit (Upper arm / Cuisse) | **Version `_mg`** (Pattes FR and BR) |
+| `L_arm_cover.stl` | 2 | Cache / Capot de protection bras gauche | Standard (Pattes FL et BL) |
+| `R_arm_cover.stl` | 2 | Cache / Capot de protection bras droit | Standard (Pattes FR and BR) |
+| `L_wrist_mg.stl` | 2 | Poignet/Tibia gauche (Lower arm / Wrist) | **Version `_mg`** (Pattes FL et BL) |
+| `R_wrist_mg.stl` | 2 | Poignet/Tibia droit (Lower arm / Wrist) | **Version `_mg`** (Pattes FR and BR) |
+| `foot.stl` | 4 | Embout de pied | À imprimer en **TPU (Flexible)** si possible |
+
+---
+
+### 4. Supports de Capteurs (Sensors Mounts)
+Pièces optionnelles mais fortement recommandées pour intégrer proprement le capteur de distance.
+
+| Fichier STL | Quantité | Rôle / Description | Notes / Assemblage |
+|-------------|:--------:|--------------------|--------------------|
+| `L_ultra_sonic.stl` | 1 | Support gauche pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` |
+| `R_ultra_sonic.stl` | 1 | Support droit pour capteur HC-SR04 | Se monte sur le capot avant `F_cover.stl` |
+
+---
+
+### ⚙️ Conseils d'Impression et Paramètres Recommandés
+
+1. **Remplissage (Infill) :**
+   * Pour le châssis central (`plate.stl`, `L_side_plate.stl`, `R_side_plate.stl`) : **20% à 30%** en motif Gyroïde ou Grille.
+   * Pour les pièces mobiles et d'effort (`I_shoulder_mg.stl`, `L_arm_joint_mg.stl`, `R_arm_joint_mg.stl`, `L_arm_mg.stl`, `R_arm_mg.stl`, `L_wrist_mg.stl`, `R_wrist_mg.stl`) : **35% à 50%** de remplissage pour garantir la rigidité sous la force des servos MG90S.
+2. **Nombre de parois (Walls/Perimeters) :**
+   * Réglez sur au moins **3 à 4 lignes de paroi** (perimeters) pour augmenter la résistance mécanique sans alourdir le robot.
+3. **Matériau :**
+   * **PLA ou PETG** pour toutes les pièces structurelles. Le PETG offre une meilleure résistance aux chocs et une flexibilité salutaire lors des chutes, mais le PLA convient parfaitement s'il est imprimé avec assez de parois.
+   * **TPU ou Filament Flexible** pour les 4 `foot.stl`. Si vous n'avez pas de TPU, vous pouvez les imprimer en PLA/PETG et coller des patins en caoutchouc ou de la gaine thermo-rétractable sous les pieds pour éviter que le robot ne glisse sur le carrelage ou le parquet.
+
