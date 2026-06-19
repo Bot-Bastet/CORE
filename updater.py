@@ -102,6 +102,15 @@ def check_and_apply_update() -> bool:
             check=True
         )
 
+        # Installer/mettre à jour le service agent
+        agent_svc = CORE_SRC / "spotbot-agent.service"
+        if agent_svc.exists():
+            logger.info("[AutoUpdater] Installation de spotbot-agent.service...")
+            subprocess.run(["cp", str(agent_svc), "/etc/systemd/system/"], check=True)
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            subprocess.run(["systemctl", "enable", "spotbot-agent.service"], check=True)
+            subprocess.run(["systemctl", "restart", "spotbot-agent.service"], check=True)
+
         VERSION_FILE.write_text(latest_tag)
         logger.info(f"[AutoUpdater] Mise à jour {latest_tag} appliquée avec succès.")
         return True

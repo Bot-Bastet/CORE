@@ -1,0 +1,14 @@
+[Unit]
+Description=Bastet Robot Real-time Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/spotbot/agent.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
