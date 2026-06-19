@@ -543,7 +543,7 @@ def start_websocket_client():
             return
 
     async def ws_loop():
-        global tts_target, stt_target, chat_target, yolo_state, face_rec_state
+        global tts_target, stt_target, chat_target, yolo_state, face_rec_state, ros2_process
         uri = f"{WS_URL}?token={API_TOKEN}"
         while True:
             try:
@@ -593,7 +593,6 @@ def start_websocket_client():
                                 elif msg_type == "start_camera":
                                     cam = data.get("camera", 1)
                                     if is_spotbot_service_active():
-                                        global ros2_process
                                         if ros2_process and ros2_process.stdin:
                                             ros2_process.stdin.write(json.dumps(data) + "\n")
                                             ros2_process.stdin.flush()
@@ -604,7 +603,6 @@ def start_websocket_client():
                                 elif msg_type == "stop_camera":
                                     cam = data.get("camera", 1)
                                     if is_spotbot_service_active():
-                                        global ros2_process
                                         if ros2_process and ros2_process.stdin:
                                             ros2_process.stdin.write(json.dumps(data) + "\n")
                                             ros2_process.stdin.flush()
@@ -614,7 +612,6 @@ def start_websocket_client():
                                     
                                 elif msg_type == "motor_calibration":
                                     print("[Agent] Commande de calibration reçue !")
-                                    global ros2_process
                                     if ros2_process and ros2_process.stdin:
                                         ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
