@@ -19,17 +19,31 @@ source /opt/spotbot/ros2_ws/install/setup.bash
 
 echo "[SpotBot] $(date) — Starting..." | tee $LOG/startup.log
 
-# 1. Camera
+# 1. Cameras
+# Camera 1 (/dev/video0)
 fuser -k /dev/video0 2>/dev/null || true
 sleep 1
 ros2 run usb_cam usb_cam_node_exe --ros-args \
+  --name usb_cam1 \
   -p video_device:=/dev/video0 -p pixel_format:=yuyv2rgb \
   -p image_width:=640 -p image_height:=480 -p framerate:=15.0 \
   -p camera_info_url:=file:///opt/spotbot/config/camera_calibration.yaml \
-  -p camera_name:=usb_cam -p frame_id:=camera_link \
+  -p camera_name:=usb_cam1 -p frame_id:=camera_link \
   -r image_raw:=/camera/image_raw -r camera_info:=/camera/camera_info \
-  >> $LOG/camera.log 2>&1 &
-echo "[SpotBot] Camera OK" | tee -a $LOG/startup.log
+  >> $LOG/camera1.log 2>&1 &
+
+# Camera 2 (/dev/video2)
+fuser -k /dev/video2 2>/dev/null || true
+sleep 1
+ros2 run usb_cam usb_cam_node_exe --ros-args \
+  --name usb_cam2 \
+  -p video_device:=/dev/video2 -p pixel_format:=yuyv2rgb \
+  -p image_width:=640 -p image_height:=480 -p framerate:=15.0 \
+  -p camera_name:=usb_cam2 -p frame_id:=camera2_link \
+  -r image_raw:=/camera2/image_raw -r camera_info:=/camera2/camera_info \
+  >> $LOG/camera2.log 2>&1 &
+
+echo "[SpotBot] Cameras OK" | tee -a $LOG/startup.log
 
 # 2. TF
 ros2 run tf2_ros static_transform_publisher \
