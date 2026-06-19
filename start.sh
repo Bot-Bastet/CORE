@@ -5,6 +5,11 @@
 LOG=/var/log/spotbot
 mkdir -p $LOG
 
+# Auto-updater
+echo "[SpotBot] Checking for updates..." | tee -a $LOG/startup.log
+python3 /opt/spotbot/updater.py >> $LOG/updater.log 2>&1
+
+
 # Fix HOME for ROS logging
 export HOME=/root
 mkdir -p /root/.ros/log
