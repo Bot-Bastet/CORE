@@ -76,31 +76,63 @@ def check_and_apply_update() -> bool:
         logger.warning("[AutoUpdater] Aucun asset .zip trouvé dans la release.")
         return False
 
+    def report_progress(status: str, percent: int):
+        try:
+            url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
+            requests.post(url, json={"status": status, "percent": percent}, timeout=5)
+        except Exception:
+            pass
+
     try:
         zip_path = Path("/tmp/core_update.zip")
 
         logger.info(f"[AutoUpdater] Téléchargement de {zip_asset['browser_download_url']}...")
         resp = requests.get(zip_asset["browser_download_url"], stream=True, timeout=120)
+        total_size = int(resp.headers.get("content-length", 0))
+        downloaded = 0
+        
+        report_progress("downloading", 0)
         with open(zip_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    percent = int((downloaded / total_size) * 100)
+                    report_progress("downloading", percent)
 
         # Extraire dans le workspace src
+        report_progress("extracting", 100)
         CORE_SRC.mkdir(parents=True, exist_ok=True)
         subprocess.run(["unzip", "-o", str(zip_path), "-d", str(CORE_SRC)], check=True)
         zip_path.unlink()
 
         # Rebuild ROS 2
+        report_progress("compiling", 0)
         logger.info("[AutoUpdater] Compilation colcon build...")
         env = os.environ.copy()
         env["PATH"] = "/opt/ros2_jazzy/install/bin:" + env.get("PATH", "")
-        subprocess.run(
+        
+        process = subprocess.Popen(
             ["bash", "-c", "source /opt/ros2_jazzy/install/setup.bash && colcon build --symlink-install"],
             cwd=str(WORKSPACE_ROOT),
-            shell=False,
-            env=env,
-            check=True
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env
         )
+        
+        total_packages = 18
+        started_packages = 0
+        for line in process.stdout:
+            if "Starting >>>" in line:
+                started_packages += 1
+                percent = min(int((started_packages / total_packages) * 100), 99)
+                report_progress("compiling", percent)
+                
+        process.wait()
+        if process.returncode != 0:
+            report_progress("failed", 0)
+            raise Exception(f"colcon build failed with code {process.returncode}")
 
         # Installer/mettre à jour le service agent
         agent_svc = CORE_SRC / "spotbot-agent.service"
