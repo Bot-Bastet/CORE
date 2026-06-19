@@ -677,6 +677,8 @@ def start_websocket_client():
                                         chat_target = target
                                     elif feature == "yolo":
                                         yolo_state = target
+                                    elif feature == "face_rec":
+                                        face_rec_state = target
                                         
                                     if latest_telemetry and "ai_state" in latest_telemetry:
                                         latest_telemetry["ai_state"] = {
@@ -702,6 +704,14 @@ def start_websocket_client():
                                             "type": "feature_ack",
                                             "feature": "yolo",
                                             "state": (yolo_state == "enabled"),
+                                            "status": "ok"
+                                        }
+                                        await ws.send(json.dumps(ack_msg))
+                                    elif feature == "face_rec":
+                                        ack_msg = {
+                                            "type": "feature_ack",
+                                            "feature": "face_rec",
+                                            "state": (face_rec_state == "enabled"),
                                             "status": "ok"
                                         }
                                         await ws.send(json.dumps(ack_msg))
