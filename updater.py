@@ -113,7 +113,7 @@ def check_and_apply_update() -> bool:
         env["PATH"] = "/opt/ros2_jazzy/install/bin:" + env.get("PATH", "")
         
         process = subprocess.Popen(
-            ["bash", "-c", "source /opt/ros2_jazzy/install/setup.bash && colcon build --symlink-install"],
+            ["sudo", "-u", "tealo", "bash", "-c", "source /opt/ros2_jazzy/install/setup.bash && colcon build --symlink-install"],
             cwd=str(WORKSPACE_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -121,7 +121,7 @@ def check_and_apply_update() -> bool:
             env=env
         )
         
-        total_packages = 18
+        total_packages = 34
         started_packages = 0
         for line in process.stdout:
             if "Starting >>>" in line:
