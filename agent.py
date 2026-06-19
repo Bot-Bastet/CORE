@@ -100,8 +100,16 @@ camera_processes = {
 }
 
 def start_camera_stream(cam_id: int):
-    if camera_processes.get(cam_id) is not None:
-        return  # Déjà en cours
+    proc = camera_processes.get(cam_id)
+    if proc is not None:
+        if proc.poll() is None:
+            return  # Déjà en cours et actif
+        else:
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            camera_processes[cam_id] = None
         
     device = "/dev/video0" if cam_id == 1 else "/dev/video2"
     rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
