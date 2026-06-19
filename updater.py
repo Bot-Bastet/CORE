@@ -12,8 +12,8 @@ from pathlib import Path
 logger = logging.getLogger("core_auto_updater")
 
 GITHUB_REPO = "Bot-Bastet/CORE"
-WORKSPACE_ROOT = Path.home() / "ros2_ws"
-CORE_SRC = WORKSPACE_ROOT / "src" / "CORE"
+WORKSPACE_ROOT = Path("/opt/spotbot/ros2_ws")
+CORE_SRC = Path("/opt/spotbot")
 VERSION_FILE = CORE_SRC / "version.txt"
 
 
