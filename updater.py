@@ -45,6 +45,15 @@ def _version_tuple(v: str) -> tuple:
         return (0, 0, 0)
 
 
+def report_progress(status: str, percent: int):
+    try:
+        url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
+        headers = {"X-API-Token": API_TOKEN}
+        requests.post(url, json={"status": status, "percent": percent}, headers=headers, timeout=5)
+    except Exception:
+        pass
+
+
 def check_and_apply_update() -> bool:
     """
     Vérifie et applique la mise à jour si disponible.
@@ -59,12 +68,14 @@ def check_and_apply_update() -> bool:
 
     if not release:
         logger.info("[AutoUpdater] Impossible de vérifier les mises à jour.")
+        report_progress("idle", 100)
         return False
 
     latest_tag = release.get("tag_name", "v0.0.0")
 
     if _version_tuple(latest_tag) <= _version_tuple(current):
         logger.info(f"[AutoUpdater] A jour ({current}). Aucune mise à jour nécessaire.")
+        report_progress("idle", 100)
         return False
 
     logger.info(f"[AutoUpdater] Nouvelle version disponible : {latest_tag} (actuelle : {current})")
@@ -77,15 +88,8 @@ def check_and_apply_update() -> bool:
 
     if not zip_asset:
         logger.warning("[AutoUpdater] Aucun asset .zip trouvé dans la release.")
+        report_progress("idle", 100)
         return False
-
-    def report_progress(status: str, percent: int):
-        try:
-            url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
-            headers = {"X-API-Token": API_TOKEN}
-            requests.post(url, json={"status": status, "percent": percent}, headers=headers, timeout=5)
-        except Exception:
-            pass
 
     try:
         zip_path = Path("/tmp/core_update.zip")
