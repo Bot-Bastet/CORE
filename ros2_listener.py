@@ -3,9 +3,10 @@ import json
 import time
 import math
 import threading
+import subprocess
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState, Imu
+from sensor_msgs.msg import JointState, Imu, Image
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32MultiArray
 
@@ -18,6 +19,8 @@ class ROS2TelemetryListener(Node):
         self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
         self.path = []
         self.topics_list = []
+        self.cam_subscribers = {1: None, 2: None}
+        self.cam_processes = {1: None, 2: None}
         
         # Subscriptions
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
@@ -117,8 +120,83 @@ class ROS2TelemetryListener(Node):
                         cal_msg = Float32MultiArray()
                         cal_msg.data = [float(x) for x in offsets]
                         self.calib_pub.publish(cal_msg)
+                elif msg_json.get("type") == "start_camera":
+                    cam_id = msg_json.get("camera", 1)
+                    self.start_cam_stream(cam_id)
+                elif msg_json.get("type") == "stop_camera":
+                    cam_id = msg_json.get("camera", 1)
+                    self.stop_cam_stream(cam_id)
             except Exception:
                 pass
+
+    def start_cam_stream(self, cam_id):
+        self.stop_cam_stream(cam_id)
+        topic = "/camera/image_raw" if cam_id == 1 else "/camera2/image_raw"
+        self.cam_subscribers[cam_id] = self.create_subscription(
+            Image,
+            topic,
+            lambda msg: self.image_callback(msg, cam_id),
+            10
+        )
+
+    def stop_cam_stream(self, cam_id):
+        if self.cam_processes[cam_id] is not None:
+            try:
+                self.cam_processes[cam_id].stdin.close()
+                self.cam_processes[cam_id].terminate()
+                self.cam_processes[cam_id].wait(timeout=2)
+            except Exception:
+                pass
+            self.cam_processes[cam_id] = None
+        if self.cam_subscribers[cam_id] is not None:
+            self.destroy_subscription(self.cam_subscribers[cam_id])
+            self.cam_subscribers[cam_id] = None
+
+    def image_callback(self, msg, cam_id):
+        if self.cam_processes[cam_id] is None:
+            enc = msg.encoding
+            pix_fmt = "rgb24"
+            if enc == "rgb8":
+                pix_fmt = "rgb24"
+            elif enc == "bgr8":
+                pix_fmt = "bgr24"
+            elif enc in ("yuyv", "yuyv422"):
+                pix_fmt = "yuyv422"
+            elif enc == "mono8":
+                pix_fmt = "gray"
+                
+            rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", pix_fmt,
+                "-s", f"{msg.width}x{msg.height}",
+                "-r", "15",
+                "-i", "-",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+                rtsp_url
+            ]
+            try:
+                self.cam_processes[cam_id] = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception:
+                return
+                
+        if self.cam_processes[cam_id] and self.cam_processes[cam_id].stdin:
+            try:
+                self.cam_processes[cam_id].stdin.write(bytes(msg.data))
+                self.cam_processes[cam_id].stdin.flush()
+            except Exception:
+                self.stop_cam_stream(cam_id)
 
 def main():
     rclpy.init()

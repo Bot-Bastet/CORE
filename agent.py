@@ -346,55 +346,120 @@ def start_ros2_listener():
 # ─── WIFI UTILS ───────────────────────────────────────────────────────────────
 
 def get_wifi_list() -> list:
+    import re
     try:
-        # Trigger dynamic scan
-        subprocess.run(["nmcli", "device", "wifi", "rescan"], capture_output=True, timeout=5)
-        # Get list using tab separator format
-        res = subprocess.run(
-            ["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,SECURITY", "device", "wifi", "list"],
-            capture_output=True,
-            text=True,
-            timeout=8
-        )
+        # Trigger scan and capture stdout
+        subprocess.run(["sudo", "iwlist", "wlan0", "scan"], capture_output=True, text=True, timeout=10)
+        res = subprocess.run(["sudo", "iwlist", "wlan0", "scan"], capture_output=True, text=True, timeout=10)
+        
         networks = []
+        current_network = {}
+        
         for line in res.stdout.split('\n'):
-            if not line.strip():
+            line = line.strip()
+            if not line:
                 continue
-            processed = line.replace(r'\:', '__COLON__')
-            parts = processed.split(':')
-            if len(parts) >= 4:
-                ssid = parts[0].replace('__COLON__', ':')
-                bssid = parts[1].replace('__COLON__', ':')
-                try:
-                    signal = int(parts[2])
-                except ValueError:
-                    signal = 0
-                security = parts[3].replace('__COLON__', ':')
                 
-                if ssid.strip():
-                    networks.append({
-                        "ssid": ssid,
-                        "bssid": bssid,
-                        "signal": signal,
-                        "security": security
-                    })
-        return networks
+            cell_match = re.search(r'Cell \d+ - Address: ([0-9A-Fa-f:]+)', line)
+            if cell_match:
+                if current_network.get("ssid"):
+                    networks.append(current_network)
+                current_network = {
+                    "bssid": cell_match.group(1),
+                    "ssid": "",
+                    "signal": 0,
+                    "security": "Open"
+                }
+                continue
+                
+            if not current_network:
+                continue
+                
+            essid_match = re.search(r'ESSID:"([^"]*)"', line)
+            if essid_match:
+                current_network["ssid"] = essid_match.group(1)
+                continue
+                
+            signal_match = re.search(r'Quality=(\d+)/(\d+)', line)
+            if signal_match:
+                q_cur = int(signal_match.group(1))
+                q_max = int(signal_match.group(2))
+                current_network["signal"] = int((q_cur / q_max) * 100) if q_max > 0 else 0
+                continue
+                
+            enc_match = re.search(r'Encryption key:(on|off)', line)
+            if enc_match:
+                if enc_match.group(1) == "off":
+                    current_network["security"] = "Open"
+                else:
+                    current_network["security"] = "Secured"
+                continue
+                
+            if "WPA2" in line or "802.11i" in line:
+                current_network["security"] = "WPA2"
+            elif "WPA" in line:
+                if current_network["security"] != "WPA2":
+                    current_network["security"] = "WPA"
+                    
+        if current_network.get("ssid"):
+            networks.append(current_network)
+            
+        # Deduplicate SSIDs, keeping the strongest signal
+        unique_networks = {}
+        for net in networks:
+            ssid = net["ssid"]
+            if not ssid:
+                continue
+            if ssid not in unique_networks or net["signal"] > unique_networks[ssid]["signal"]:
+                unique_networks[ssid] = net
+                
+        return list(unique_networks.values())
     except Exception as e:
-        print(f"[Agent] Erreur scan wifi: {e}")
+        print(f"[Agent] Erreur scan wifi wpa: {e}")
         return []
 
 def connect_to_wifi(ssid: str, password: str) -> dict:
     try:
-        if password:
-            cmd = ["nmcli", "device", "wifi", "connect", ssid, "password", password]
-        else:
-            cmd = ["nmcli", "device", "wifi", "connect", ssid]
+        conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
+        content = ""
+        if os.path.exists(conf_path):
+            with open(conf_path, "r") as f:
+                content = f.read()
+                
+        # Strip existing blocks for this SSID
+        blocks = content.split("network={")
+        new_blocks = [blocks[0]]
+        for block in blocks[1:]:
+            brace_idx = block.find("}")
+            if brace_idx != -1:
+                block_content = block[:brace_idx]
+                rest = block[brace_idx:]
+                if f'ssid="{ssid}"' in block_content or f"ssid='{ssid}'" in block_content:
+                    new_blocks[0] += rest.lstrip("}").lstrip("\n")
+                    continue
+            new_blocks.append("network={" + block)
             
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if res.returncode == 0:
-            return {"status": "success", "message": f"Connecté à {ssid} avec succès."}
+        new_content = "".join(new_blocks).strip() + "\n\n"
+        if password:
+            new_network = f'network={{\n\tssid="{ssid}"\n\tpsk="{password}"\n}}\n'
         else:
-            return {"status": "error", "message": res.stderr.strip() or res.stdout.strip()}
+            new_network = f'network={{\n\tssid="{ssid}"\n\tkey_mgmt=NONE\n}}\n'
+            
+        new_content += new_network
+        with open(conf_path, "w") as f:
+            f.write(new_content)
+            
+        # Reconfigure wpa_supplicant
+        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
+        
+        # Wait up to 12s for connection to establish
+        for _ in range(12):
+            res = subprocess.run(["ip", "addr", "show", "wlan0"], capture_output=True, text=True)
+            if "inet " in res.stdout:
+                return {"status": "success", "message": f"Connecté à {ssid} avec succès."}
+            time.sleep(1)
+            
+        return {"status": "error", "message": f"Délai d'obtention IP dépassé pour {ssid}."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -527,11 +592,25 @@ def start_websocket_client():
                                     
                                 elif msg_type == "start_camera":
                                     cam = data.get("camera", 1)
-                                    start_camera_stream(cam)
+                                    if is_spotbot_service_active():
+                                        global ros2_process
+                                        if ros2_process and ros2_process.stdin:
+                                            ros2_process.stdin.write(json.dumps(data) + "\n")
+                                            ros2_process.stdin.flush()
+                                            print(f"[Agent] Start camera {cam} déléguée au ros2_listener (ROS actif).")
+                                    else:
+                                        start_camera_stream(cam)
                                     
                                 elif msg_type == "stop_camera":
                                     cam = data.get("camera", 1)
-                                    stop_camera_stream(cam)
+                                    if is_spotbot_service_active():
+                                        global ros2_process
+                                        if ros2_process and ros2_process.stdin:
+                                            ros2_process.stdin.write(json.dumps(data) + "\n")
+                                            ros2_process.stdin.flush()
+                                            print(f"[Agent] Stop camera {cam} déléguée au ros2_listener (ROS actif).")
+                                    else:
+                                        stop_camera_stream(cam)
                                     
                                 elif msg_type == "motor_calibration":
                                     print("[Agent] Commande de calibration reçue !")

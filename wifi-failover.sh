@@ -16,11 +16,7 @@ get_wifi_interfaces() {
 }
 
 current_ssid() {
-    if command -v nmcli &>/dev/null; then
-        nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | cut -d: -f2 | head -n 1
-    else
-        iwgetid -r 2>/dev/null
-    fi
+    iwgetid -r 2>/dev/null
 }
 
 current_active_interface() {
@@ -44,16 +40,37 @@ connect_wifi() {
     echo "$(date) [failover] Connecting $iface to $ssid..." >> $LOG
     ip link set $iface up 2>/dev/null
     
-    if command -v nmcli &>/dev/null; then
-        if [ -n "$psk" ]; then
-            nmcli device wifi connect "$ssid" password "$psk" ifname "$iface" > /dev/null 2>&1
-        else
-            nmcli device wifi connect "$ssid" ifname "$iface" > /dev/null 2>&1
-        fi
-    else
-        # Fallback wpa_supplicant
-        wpa_cli -i $iface reconfigure > /dev/null 2>&1
-    fi
+    # Configure wpa_supplicant.conf
+    python3 -c "
+import sys, os
+ssid = '$ssid'
+psk = '$psk'
+conf_path = '/etc/wpa_supplicant/wpa_supplicant.conf'
+content = ''
+if os.path.exists(conf_path):
+    with open(conf_path, 'r') as f:
+        content = f.read()
+blocks = content.split('network={')
+new_blocks = [blocks[0]]
+for b in blocks[1:]:
+    brace_idx = b.find('}')
+    if brace_idx != -1:
+        block_content = b[:brace_idx]
+        rest = b[brace_idx:]
+        if f'ssid=\"{ssid}\"' in block_content or f'ssid=\'{ssid}\'' in block_content:
+            new_blocks[0] += rest.lstrip('}').lstrip('\n')
+            continue
+    new_blocks.append('network={' + b)
+new_content = ''.join(new_blocks).strip() + '\n\n'
+if psk:
+    new_network = f'network={{\n\tssid=\"{ssid}\"\n\tpsk=\"{psk}\"\n}}\n'
+else:
+    new_network = f'network={{\n\tssid=\"{ssid}\"\n\tkey_mgmt=NONE\n}}\n'
+new_content += new_network
+with open(conf_path, 'w') as f:
+    f.write(new_content)
+"
+    wpa_cli -i $iface reconfigure > /dev/null 2>&1
 }
 
 echo "$(date) [failover] WiFi failover service started" >> $LOG
@@ -74,10 +91,9 @@ while true; do
     sleep 2
     
     BASTET_VISIBLE=false
-    if command -v nmcli &>/dev/null; then
-        if nmcli -t -f SSID dev wifi list 2>/dev/null | grep -Fqx "bastet"; then
-            BASTET_VISIBLE=true
-        fi
+    # Scan using iwlist which works on unmanaged interfaces
+    if iwlist wlan0 scan 2>/dev/null | grep -Eq 'ESSID:"bastet"'; then
+        BASTET_VISIBLE=true
     fi
     
     CUR_SSID=$(current_ssid)
