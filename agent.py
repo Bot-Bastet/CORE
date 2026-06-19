@@ -99,6 +99,18 @@ camera_processes = {
     2: None
 }
 
+def is_device_free(device: str) -> bool:
+    """Vérifie qu'un périphérique vidéo existe et n'est pas verrouillé."""
+    import os
+    if not os.path.exists(device):
+        return False
+    try:
+        result = subprocess.run(["fuser", device], capture_output=True, text=True)
+        # fuser retourne 0 et affiche le PID si verrouillé, exit 1 si libre
+        return result.returncode != 0
+    except Exception:
+        return True  # Assume libre si fuser n'est pas dispo
+
 def start_camera_stream(cam_id: int):
     proc = camera_processes.get(cam_id)
     if proc is not None:
@@ -110,10 +122,29 @@ def start_camera_stream(cam_id: int):
             except Exception:
                 pass
             camera_processes[cam_id] = None
-        
-    device = "/dev/video0" if cam_id == 1 else "/dev/video2"
+
+    # Pour cam1, essayer /dev/video0 puis /dev/video1 si 0 est verrouillé
+    if cam_id == 1:
+        if is_device_free("/dev/video0"):
+            device = "/dev/video0"
+        elif is_device_free("/dev/video1"):
+            device = "/dev/video1"
+        else:
+            print(f"[Agent] Cam {cam_id}: /dev/video0 et /dev/video1 indisponibles (verrouillés par ROS).")
+            return
+    else:
+        # Pour cam2, chercher le premier device libre parmi video2, video3...
+        device = None
+        for d in ["/dev/video2", "/dev/video3", "/dev/video4"]:
+            if is_device_free(d):
+                device = d
+                break
+        if device is None:
+            print(f"[Agent] Cam {cam_id}: Aucun device vidéo disponible.")
+            return
+
     rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
-    
+
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -132,12 +163,13 @@ def start_camera_stream(cam_id: int):
         "-rtsp_transport", "tcp",
         rtsp_url
     ]
-    
+
     try:
-        print(f"[Agent] Démarrage du flux RTSP pour Cam {cam_id}...")
+        print(f"[Agent] Démarrage du flux RTSP Cam {cam_id} sur {device}...")
         camera_processes[cam_id] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         print(f"[Agent] Erreur démarrage Cam {cam_id} : {e}")
+
 
 def stop_camera_stream(cam_id: int):
     proc = camera_processes.get(cam_id)
