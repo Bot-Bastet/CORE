@@ -24,6 +24,10 @@ ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
+# Global variables for ROS 2 subprocess telemetry
+ros2_process = None
+latest_telemetry = None
+
 def get_version() -> str:
     if VERSION_FILE.exists():
         try:
@@ -89,7 +93,6 @@ def is_spotbot_service_active() -> bool:
 def trigger_updater():
     print("[Agent] Lancement de la mise à jour...")
     try:
-        # Exécuter l'updater en tâche de fond pour ne pas bloquer l'agent
         subprocess.Popen(["sudo", "python3", "/opt/spotbot/updater.py"])
     except Exception as e:
         print(f"[Agent] Erreur lancement updater : {e}")
@@ -101,21 +104,19 @@ camera_processes = {
 
 def is_device_free(device: str) -> bool:
     """Vérifie qu'un périphérique vidéo existe et n'est pas verrouillé."""
-    import os
     if not os.path.exists(device):
         return False
     try:
         result = subprocess.run(["fuser", device], capture_output=True, text=True)
-        # fuser retourne 0 et affiche le PID si verrouillé, exit 1 si libre
         return result.returncode != 0
     except Exception:
-        return True  # Assume libre si fuser n'est pas dispo
+        return True
 
 def start_camera_stream(cam_id: int):
     proc = camera_processes.get(cam_id)
     if proc is not None:
         if proc.poll() is None:
-            return  # Déjà en cours et actif
+            return
         else:
             try:
                 proc.wait()
@@ -123,7 +124,6 @@ def start_camera_stream(cam_id: int):
                 pass
             camera_processes[cam_id] = None
 
-    # Pour cam1, essayer /dev/video0 puis /dev/video1 si 0 est verrouillé
     if cam_id == 1:
         if is_device_free("/dev/video0"):
             device = "/dev/video0"
@@ -133,7 +133,6 @@ def start_camera_stream(cam_id: int):
             print(f"[Agent] Cam {cam_id}: /dev/video0 et /dev/video1 indisponibles (verrouillés par ROS).")
             return
     else:
-        # Pour cam2, chercher le premier device libre parmi video2, video3...
         device = None
         for d in ["/dev/video2", "/dev/video3", "/dev/video4"]:
             if is_device_free(d):
@@ -170,7 +169,6 @@ def start_camera_stream(cam_id: int):
     except Exception as e:
         print(f"[Agent] Erreur démarrage Cam {cam_id} : {e}")
 
-
 def stop_camera_stream(cam_id: int):
     proc = camera_processes.get(cam_id)
     if proc is not None:
@@ -184,7 +182,6 @@ def stop_camera_stream(cam_id: int):
             except Exception:
                 pass
         camera_processes[cam_id] = None
-
 
 # ─── ARDUINO FIRMWARE ACTIONS ─────────────────────────────────────────────────
 
@@ -219,7 +216,6 @@ def flash_arduino_task():
     print("[Agent] Début de la mise à jour/flash Arduino...")
     report_arduino_progress("stopping_services", 10)
     
-    # Arrêter spotbot.service pour libérer le port série
     was_active = is_spotbot_service_active()
     if was_active:
         print("[Agent] Arrêt de spotbot.service...")
@@ -227,7 +223,6 @@ def flash_arduino_task():
         
     try:
         import glob
-        # Trouver le port de l'Arduino Mega
         port = None
         try:
             import serial.tools.list_ports
@@ -254,7 +249,6 @@ def flash_arduino_task():
         print(f"[Agent] Arduino trouvé sur {port}")
         report_arduino_progress("compiling", 30)
 
-        # Compiler
         sketch_path = "/opt/spotbot/arduino/spotbot_controller"
         build_path = "/tmp/spotbot_arduino_build"
         
@@ -272,7 +266,6 @@ def flash_arduino_task():
 
         report_arduino_progress("flashing", 70)
         
-        # Uploader/Flasher
         upload_res = subprocess.run([
             "arduino-cli", "upload",
             "--fqbn", "arduino:avr:mega",
@@ -285,7 +278,6 @@ def flash_arduino_task():
             report_arduino_progress("failed_flash", 0)
             return
 
-        # Écrire la version actuelle
         version = get_version()
         ARDUINO_VERSION_FILE.write_text(version)
         
@@ -304,9 +296,97 @@ def flash_arduino_task():
 def trigger_arduino_flash():
     threading.Thread(target=flash_arduino_task, daemon=True).start()
 
+# ─── ROS 2 TELEMETRY SUBPROCESS ───────────────────────────────────────────────
+
+def start_ros2_listener():
+    global ros2_process, latest_telemetry
+    cmd = [
+        "bash", "-c",
+        "source /opt/ros2_jazzy/install/setup.bash && source /opt/spotbot/ros2_ws/install/setup.bash && python3 /opt/spotbot/ros2_listener.py"
+    ]
+    try:
+        print("[Agent] Démarrage du subprocess ros2_listener...")
+        ros2_process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1
+        )
+        
+        def read_stdout():
+            global latest_telemetry
+            for line in ros2_process.stdout:
+                try:
+                    data = json.loads(line.strip())
+                    latest_telemetry = data
+                except Exception:
+                    pass
+                    
+        t = threading.Thread(target=read_stdout, daemon=True)
+        t.start()
+    except Exception as e:
+        print(f"[Agent] Erreur démarrage ros2_listener: {e}")
+
+# ─── WIFI UTILS ───────────────────────────────────────────────────────────────
+
+def get_wifi_list() -> list:
+    try:
+        # Trigger dynamic scan
+        subprocess.run(["nmcli", "device", "wifi", "rescan"], capture_output=True, timeout=5)
+        # Get list using tab separator format
+        res = subprocess.run(
+            ["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,SECURITY", "device", "wifi", "list"],
+            capture_output=True,
+            text=True,
+            timeout=8
+        )
+        networks = []
+        for line in res.stdout.split('\n'):
+            if not line.strip():
+                continue
+            processed = line.replace(r'\:', '__COLON__')
+            parts = processed.split(':')
+            if len(parts) >= 4:
+                ssid = parts[0].replace('__COLON__', ':')
+                bssid = parts[1].replace('__COLON__', ':')
+                try:
+                    signal = int(parts[2])
+                except ValueError:
+                    signal = 0
+                security = parts[3].replace('__COLON__', ':')
+                
+                if ssid.strip():
+                    networks.append({
+                        "ssid": ssid,
+                        "bssid": bssid,
+                        "signal": signal,
+                        "security": security
+                    })
+        return networks
+    except Exception as e:
+        print(f"[Agent] Erreur scan wifi: {e}")
+        return []
+
+def connect_to_wifi(ssid: str, password: str) -> dict:
+    try:
+        if password:
+            cmd = ["nmcli", "device", "wifi", "connect", ssid, "password", password]
+        else:
+            cmd = ["nmcli", "device", "wifi", "connect", ssid]
+            
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if res.returncode == 0:
+            return {"status": "success", "message": f"Connecté à {ssid} avec succès."}
+        else:
+            return {"status": "error", "message": res.stderr.strip() or res.stdout.strip()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ─── MAIN LOOPS ───────────────────────────────────────────────────────────────
 
 def update_status_loop():
-    """Rapporte régulièrement l'état à la Gateway via REST."""
     print("[Agent] Démarrage du rapport d'état périodique...")
     while True:
         try:
@@ -314,7 +394,6 @@ def update_status_loop():
             status = "online" if active else "hibernating"
             
             metrics = get_system_metrics()
-            # Calculate CPU percentage based on 1m load average (Pi 5 has 4 cores)
             cpu_percent = min(int(metrics.get("cpu_load_1m", 0.0) * 25), 100)
 
             payload = {
@@ -353,13 +432,10 @@ def update_status_loop():
         time.sleep(5)
 
 def hourly_update_loop():
-    """Déclenche la vérification de mise à jour toutes les heures en mode hibernation."""
     print("[Agent] Démarrage de la surveillance des mises à jour (toutes les heures)...")
     while True:
-        # Attendre 1 heure
         time.sleep(3600)
         try:
-            # Ne pas mettre à jour si le robot est actif
             if not is_spotbot_service_active():
                 print("[Agent] Mode hibernation détecté. Vérification horaire de mise à jour...")
                 trigger_updater()
@@ -367,9 +443,6 @@ def hourly_update_loop():
             print(f"[Agent] Erreur boucle mise à jour : {e}")
 
 def start_websocket_client():
-    """Écoute en WebSocket pour les commandes instantanées."""
-    # Note : On utilise 'websockets' s'il est installé, sinon on boucle/rebranche
-    # Pour s'assurer de ne pas crash si websockets n'est pas dispo, on tente un import.
     try:
         import websockets
         import asyncio
@@ -390,41 +463,77 @@ def start_websocket_client():
                 print(f"[Agent] Connexion WebSocket vers {WS_URL}...")
                 async with websockets.connect(uri, ssl=ssl_ctx) as ws:
                     print("[Agent] Connecté au WebSocket de la Gateway.")
-                    # S'identifier
                     await ws.send(json.dumps({"type": "chat", "text": f"Bastet Agent {get_version()} connecté."}))
                     
-                    while True:
-                        msg = await ws.recv()
-                        try:
-                            data = json.loads(msg)
-                            msg_type = data.get("type")
+                    # Concurrently broadcast telemetry data
+                    async def send_telemetry_loop():
+                        last_sent = None
+                        while True:
+                            global latest_telemetry
+                            if latest_telemetry and latest_telemetry != last_sent:
+                                try:
+                                    await ws.send(json.dumps(latest_telemetry))
+                                    last_sent = latest_telemetry
+                                except Exception:
+                                    break
+                            await asyncio.sleep(0.5)
                             
-                            if msg_type == "trigger_update":
-                                print("[Agent] Commande de mise à jour reçue par WebSocket !")
-                                trigger_updater()
+                    telemetry_task = asyncio.create_task(send_telemetry_loop())
+                    
+                    try:
+                        while True:
+                            msg = await ws.recv()
+                            try:
+                                data = json.loads(msg)
+                                msg_type = data.get("type")
                                 
-                            elif msg_type == "trigger_arduino_flash":
-                                print("[Agent] Commande de flash Arduino reçue par WebSocket !")
-                                trigger_arduino_flash()
-                                
-                            elif msg_type == "start_robot":
-                                print("[Agent] Commande de démarrage du robot reçue !")
-                                subprocess.run(["sudo", "systemctl", "start", "spotbot.service"])
-                                
-                            elif msg_type == "stop_robot":
-                                print("[Agent] Commande d'arrêt du robot reçue !")
-                                subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"])
-                                
-                            elif msg_type == "start_camera":
-                                cam = data.get("camera", 1)
-                                start_camera_stream(cam)
-                                
-                            elif msg_type == "stop_camera":
-                                cam = data.get("camera", 1)
-                                stop_camera_stream(cam)
-                                
-                        except json.JSONDecodeError:
-                            pass
+                                if msg_type == "trigger_update":
+                                    print("[Agent] Commande de mise à jour reçue !")
+                                    trigger_updater()
+                                    
+                                elif msg_type == "trigger_arduino_flash":
+                                    print("[Agent] Commande de flash Arduino reçue !")
+                                    trigger_arduino_flash()
+                                    
+                                elif msg_type == "start_robot":
+                                    print("[Agent] Commande de démarrage du robot reçue !")
+                                    subprocess.run(["sudo", "systemctl", "start", "spotbot.service"])
+                                    
+                                elif msg_type == "stop_robot":
+                                    print("[Agent] Commande d'arrêt du robot reçue !")
+                                    subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"])
+                                    
+                                elif msg_type == "start_camera":
+                                    cam = data.get("camera", 1)
+                                    start_camera_stream(cam)
+                                    
+                                elif msg_type == "stop_camera":
+                                    cam = data.get("camera", 1)
+                                    stop_camera_stream(cam)
+                                    
+                                elif msg_type == "motor_calibration":
+                                    print("[Agent] Commande de calibration reçue !")
+                                    global ros2_process
+                                    if ros2_process and ros2_process.stdin:
+                                        ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        ros2_process.stdin.flush()
+                                        
+                                elif msg_type == "scan_wifi":
+                                    print("[Agent] Commande de scan WiFi reçue !")
+                                    networks = get_wifi_list()
+                                    await ws.send(json.dumps({"type": "wifi_list", "networks": networks}))
+                                    
+                                elif msg_type == "connect_wifi":
+                                    ssid = data.get("ssid")
+                                    password = data.get("password")
+                                    print(f"[Agent] Connexion WiFi vers {ssid}...")
+                                    res = connect_to_wifi(ssid, password)
+                                    await ws.send(json.dumps({"type": "wifi_connect_result", **res}))
+                                    
+                            except json.JSONDecodeError:
+                                pass
+                    finally:
+                        telemetry_task.cancel()
             except Exception as e:
                 print(f"[Agent] Déconnexion WebSocket ({e}). Reconnexion dans 5s...")
                 await asyncio.sleep(5)
@@ -433,6 +542,9 @@ def start_websocket_client():
 
 if __name__ == "__main__":
     print(f"--- Démarrage de l'Agent Bastet ({get_version()}) ---")
+    
+    # Démarrer le subprocess ROS 2
+    start_ros2_listener()
     
     # Thread 1: Envoi périodique de l'état (REST)
     t_status = threading.Thread(target=update_status_loop, daemon=True)
