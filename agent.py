@@ -185,6 +185,126 @@ def stop_camera_stream(cam_id: int):
                 pass
         camera_processes[cam_id] = None
 
+
+# ─── ARDUINO FIRMWARE ACTIONS ─────────────────────────────────────────────────
+
+ARDUINO_VERSION_FILE = Path("/opt/spotbot/arduino_version.txt")
+
+def get_arduino_version() -> str:
+    if ARDUINO_VERSION_FILE.exists():
+        try:
+            return ARDUINO_VERSION_FILE.read_text().strip()
+        except Exception:
+            pass
+    return "v0.0.0"
+
+def report_arduino_progress(status: str, percent: int):
+    try:
+        url = f"{GATEWAY_URL}/system/update/arduino/progress"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"status": status, "percent": percent}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Token": API_TOKEN
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as resp:
+            resp.read()
+    except Exception as e:
+        print(f"[Agent] Erreur envoi progrès Arduino : {e}")
+
+def flash_arduino_task():
+    print("[Agent] Début de la mise à jour/flash Arduino...")
+    report_arduino_progress("stopping_services", 10)
+    
+    # Arrêter spotbot.service pour libérer le port série
+    was_active = is_spotbot_service_active()
+    if was_active:
+        print("[Agent] Arrêt de spotbot.service...")
+        subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"])
+        
+    try:
+        import glob
+        # Trouver le port de l'Arduino Mega
+        port = None
+        try:
+            import serial.tools.list_ports
+            for p in serial.tools.list_ports.comports():
+                desc = (p.description or '').lower()
+                if 'arduino' in desc or (p.vid == 0x2341 and p.pid in (0x0010, 0x0042)):
+                    port = p.device
+                    break
+        except Exception:
+            pass
+            
+        if not port:
+            for pattern in ['/dev/ttyUSB*', '/dev/ttyACM*']:
+                ports = sorted(glob.glob(pattern))
+                if ports:
+                    port = ports[0]
+                    break
+                    
+        if not port:
+            print("[Agent] Arduino non trouvé.")
+            report_arduino_progress("failed_no_device", 0)
+            return
+
+        print(f"[Agent] Arduino trouvé sur {port}")
+        report_arduino_progress("compiling", 30)
+
+        # Compiler
+        sketch_path = "/opt/spotbot/arduino/spotbot_controller"
+        build_path = "/tmp/spotbot_arduino_build"
+        
+        comp_res = subprocess.run([
+            "arduino-cli", "compile",
+            "--fqbn", "arduino:avr:mega",
+            "--build-path", build_path,
+            sketch_path
+        ], capture_output=True, text=True)
+        
+        if comp_res.returncode != 0:
+            print(f"[Agent] Erreur compilation : {comp_res.stderr}")
+            report_arduino_progress("failed_compilation", 0)
+            return
+
+        report_arduino_progress("flashing", 70)
+        
+        # Uploader/Flasher
+        upload_res = subprocess.run([
+            "arduino-cli", "upload",
+            "--fqbn", "arduino:avr:mega",
+            "--port", port,
+            "--input-dir", build_path
+        ], capture_output=True, text=True)
+        
+        if upload_res.returncode != 0:
+            print(f"[Agent] Erreur flashage : {upload_res.stderr}")
+            report_arduino_progress("failed_flash", 0)
+            return
+
+        # Écrire la version actuelle
+        version = get_version()
+        ARDUINO_VERSION_FILE.write_text(version)
+        
+        print("[Agent] Flash Arduino réussi !")
+        report_arduino_progress("idle", 100)
+        
+    except Exception as e:
+        print(f"[Agent] Erreur générale flash Arduino : {e}")
+        report_arduino_progress("failed_error", 0)
+        
+    finally:
+        if was_active:
+            print("[Agent] Redémarrage de spotbot.service...")
+            subprocess.run(["sudo", "systemctl", "start", "spotbot.service"])
+
+def trigger_arduino_flash():
+    threading.Thread(target=flash_arduino_task, daemon=True).start()
+
+
 def update_status_loop():
     """Rapporte régulièrement l'état à la Gateway via REST."""
     print("[Agent] Démarrage du rapport d'état périodique...")
@@ -203,6 +323,7 @@ def update_status_loop():
                 "last_chat": [],
                 "robot_status": status,
                 "robot_version": get_version(),
+                "arduino_version": get_arduino_version(),
                 "sensors": {
                     "cpu_percent": cpu_percent,
                     "ram_percent": metrics.get("ram_percent", 0.0),
@@ -281,6 +402,10 @@ def start_websocket_client():
                             if msg_type == "trigger_update":
                                 print("[Agent] Commande de mise à jour reçue par WebSocket !")
                                 trigger_updater()
+                                
+                            elif msg_type == "trigger_arduino_flash":
+                                print("[Agent] Commande de flash Arduino reçue par WebSocket !")
+                                trigger_arduino_flash()
                                 
                             elif msg_type == "start_robot":
                                 print("[Agent] Commande de démarrage du robot reçue !")

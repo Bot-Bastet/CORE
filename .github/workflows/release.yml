@@ -28,6 +28,10 @@ jobs:
             --exclude "*.git*" \
             --exclude "*.log"
 
+      - name: Create Arduino Release Archive
+        run: |
+          zip -r arduino-firmware-${{ steps.version.outputs.VERSION }}.zip arduino/
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -46,5 +50,6 @@ jobs:
             ```
           files: |
             core-embedded-${{ steps.version.outputs.VERSION }}.zip
+            arduino-firmware-${{ steps.version.outputs.VERSION }}.zip
           draft: false
           prerelease: ${{ contains(steps.version.outputs.VERSION, '-beta') || contains(steps.version.outputs.VERSION, '-rc') }}
