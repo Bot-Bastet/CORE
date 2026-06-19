@@ -17,6 +17,9 @@ CORE_SRC = Path("/opt/spotbot")
 VERSION_FILE = CORE_SRC / "version.txt"
 
 
+API_TOKEN = "bst_c9f28d3a1e4b85c7f0d4b9a2e6f1c3d5"
+
+
 def get_current_version() -> str:
     if VERSION_FILE.exists():
         return VERSION_FILE.read_text().strip()
@@ -79,7 +82,8 @@ def check_and_apply_update() -> bool:
     def report_progress(status: str, percent: int):
         try:
             url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
-            requests.post(url, json={"status": status, "percent": percent}, timeout=5)
+            headers = {"X-API-Token": API_TOKEN}
+            requests.post(url, json={"status": status, "percent": percent}, headers=headers, timeout=5)
         except Exception:
             pass
 

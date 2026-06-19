@@ -94,6 +94,57 @@ def trigger_updater():
     except Exception as e:
         print(f"[Agent] Erreur lancement updater : {e}")
 
+camera_processes = {
+    1: None,
+    2: None
+}
+
+def start_camera_stream(cam_id: int):
+    if camera_processes.get(cam_id) is not None:
+        return  # Déjà en cours
+        
+    device = "/dev/video0" if cam_id == 1 else "/dev/video2"
+    rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
+    
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-f", "v4l2",
+        "-input_format", "mjpeg",
+        "-video_size", "640x480",
+        "-framerate", "15",
+        "-i", device,
+        "-vcodec", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-g", "30",
+        "-bf", "0",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        rtsp_url
+    ]
+    
+    try:
+        print(f"[Agent] Démarrage du flux RTSP pour Cam {cam_id}...")
+        camera_processes[cam_id] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"[Agent] Erreur démarrage Cam {cam_id} : {e}")
+
+def stop_camera_stream(cam_id: int):
+    proc = camera_processes.get(cam_id)
+    if proc is not None:
+        print(f"[Agent] Arrêt du flux RTSP pour Cam {cam_id}...")
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        camera_processes[cam_id] = None
+
 def update_status_loop():
     """Rapporte régulièrement l'état à la Gateway via REST."""
     print("[Agent] Démarrage du rapport d'état périodique...")
@@ -102,6 +153,10 @@ def update_status_loop():
             active = is_spotbot_service_active()
             status = "online" if active else "hibernating"
             
+            metrics = get_system_metrics()
+            # Calculate CPU percentage based on 1m load average (Pi 5 has 4 cores)
+            cpu_percent = min(int(metrics.get("cpu_load_1m", 0.0) * 25), 100)
+
             payload = {
                 "seen_person": None,
                 "seen_objects": [],
@@ -109,7 +164,11 @@ def update_status_loop():
                 "robot_status": status,
                 "robot_version": get_version(),
                 "sensors": {
-                    "system": get_system_metrics(),
+                    "cpu_percent": cpu_percent,
+                    "ram_percent": metrics.get("ram_percent", 0.0),
+                    "temp_c": metrics.get("cpu_temp", 0.0),
+                    "spotbot_service_active": active,
+                    "system": metrics,
                     "spotbot_service": "active" if active else "inactive"
                 }
             }
@@ -190,6 +249,14 @@ def start_websocket_client():
                             elif msg_type == "stop_robot":
                                 print("[Agent] Commande d'arrêt du robot reçue !")
                                 subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"])
+                                
+                            elif msg_type == "start_camera":
+                                cam = data.get("camera", 1)
+                                start_camera_stream(cam)
+                                
+                            elif msg_type == "stop_camera":
+                                cam = data.get("camera", 1)
+                                stop_camera_stream(cam)
                                 
                         except json.JSONDecodeError:
                             pass
