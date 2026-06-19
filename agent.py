@@ -478,6 +478,7 @@ def start_websocket_client():
             return
 
     async def ws_loop():
+        global tts_target, stt_target, chat_target, yolo_state, face_rec_state
         uri = f"{WS_URL}?token={API_TOKEN}"
         while True:
             try:
@@ -556,7 +557,6 @@ def start_websocket_client():
                                     state = data.get("state")
                                     print(f"[Agent] feature_request reçue : {feature} -> {state}")
                                     
-                                    global tts_target, stt_target, chat_target, yolo_state, face_rec_state
                                     if feature == "audio":
                                         if state:
                                             tts_target = "node"
@@ -593,7 +593,6 @@ def start_websocket_client():
                                     target = data.get("target")
                                     print(f"[Agent] Commande ai_control reçue de l'app: {feature} -> {target}")
                                     
-                                    global tts_target, stt_target, chat_target, yolo_state
                                     if feature == "tts":
                                         tts_target = target
                                     elif feature == "stt":
