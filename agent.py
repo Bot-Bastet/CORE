@@ -28,6 +28,13 @@ ssl_ctx.verify_mode = ssl.CERT_NONE
 ros2_process = None
 latest_telemetry = None
 
+# AI Pipeline state variables
+tts_target = "robot"
+stt_target = "robot"
+chat_target = "robot"
+yolo_state = "disabled"
+face_rec_state = "disabled"
+
 def get_version() -> str:
     if VERSION_FILE.exists():
         try:
@@ -320,6 +327,13 @@ def start_ros2_listener():
             for line in ros2_process.stdout:
                 try:
                     data = json.loads(line.strip())
+                    data["ai_state"] = {
+                        "tts": tts_target,
+                        "stt": stt_target,
+                        "chat": chat_target,
+                        "yolo": yolo_state,
+                        "face_rec": face_rec_state
+                    }
                     latest_telemetry = data
                 except Exception:
                     pass
@@ -410,6 +424,13 @@ def update_status_loop():
                     "spotbot_service_active": active,
                     "system": metrics,
                     "spotbot_service": "active" if active else "inactive"
+                },
+                "ai_state": {
+                    "tts": tts_target,
+                    "stt": stt_target,
+                    "chat": chat_target,
+                    "yolo": yolo_state,
+                    "face_rec": face_rec_state
                 }
             }
             
@@ -530,6 +551,86 @@ def start_websocket_client():
                                     res = connect_to_wifi(ssid, password)
                                     await ws.send(json.dumps({"type": "wifi_connect_result", **res}))
                                     
+                                elif msg_type == "feature_request":
+                                    feature = data.get("feature")
+                                    state = data.get("state")
+                                    print(f"[Agent] feature_request reçue : {feature} -> {state}")
+                                    
+                                    global tts_target, stt_target, chat_target, yolo_state, face_rec_state
+                                    if feature == "audio":
+                                        if state:
+                                            tts_target = "node"
+                                            stt_target = "node"
+                                            chat_target = "node"
+                                        else:
+                                            tts_target = "robot"
+                                            stt_target = "robot"
+                                            chat_target = "robot"
+                                    elif feature == "yolo":
+                                        yolo_state = "enabled" if state else "disabled"
+                                    elif feature == "face_rec":
+                                        face_rec_state = "enabled" if state else "disabled"
+                                        
+                                    if latest_telemetry and "ai_state" in latest_telemetry:
+                                        latest_telemetry["ai_state"] = {
+                                            "tts": tts_target,
+                                            "stt": stt_target,
+                                            "chat": chat_target,
+                                            "yolo": yolo_state,
+                                            "face_rec": face_rec_state
+                                        }
+                                        
+                                    ack_msg = {
+                                        "type": "feature_ack",
+                                        "feature": feature,
+                                        "state": state,
+                                        "status": "ok"
+                                    }
+                                    await ws.send(json.dumps(ack_msg))
+                                    
+                                elif msg_type == "ai_control":
+                                    feature = data.get("feature")
+                                    target = data.get("target")
+                                    print(f"[Agent] Commande ai_control reçue de l'app: {feature} -> {target}")
+                                    
+                                    global tts_target, stt_target, chat_target, yolo_state
+                                    if feature == "tts":
+                                        tts_target = target
+                                    elif feature == "stt":
+                                        stt_target = target
+                                    elif feature == "chat":
+                                        chat_target = target
+                                    elif feature == "yolo":
+                                        yolo_state = target
+                                        
+                                    if latest_telemetry and "ai_state" in latest_telemetry:
+                                        latest_telemetry["ai_state"] = {
+                                            "tts": tts_target,
+                                            "stt": stt_target,
+                                            "chat": chat_target,
+                                            "yolo": yolo_state,
+                                            "face_rec": face_rec_state
+                                        }
+                                        
+                                    # Send feature_ack to CORE-Node to sync its checkboxes
+                                    if feature in ("tts", "stt", "chat"):
+                                        audio_active = (tts_target == "node" or stt_target == "node" or chat_target == "node")
+                                        ack_msg = {
+                                            "type": "feature_ack",
+                                            "feature": "audio",
+                                            "state": audio_active,
+                                            "status": "ok"
+                                        }
+                                        await ws.send(json.dumps(ack_msg))
+                                    elif feature == "yolo":
+                                        ack_msg = {
+                                            "type": "feature_ack",
+                                            "feature": "yolo",
+                                            "state": (yolo_state == "enabled"),
+                                            "status": "ok"
+                                        }
+                                        await ws.send(json.dumps(ack_msg))
+                                        
                             except json.JSONDecodeError:
                                 pass
                     finally:
