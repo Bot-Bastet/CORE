@@ -1,0 +1,47 @@
+name: Release CORE
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create Release Archive
+        run: |
+          zip -r core-embedded-${{ steps.version.outputs.VERSION }}.zip . \
+            --exclude "*.git*" \
+            --exclude "*.log"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "CORE Embedded ${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## CORE Embedded ${{ steps.version.outputs.VERSION }}
+
+            Firmware ROS 2 pour le robot quadrupède Bastet (Raspberry Pi 5).
+
+            ### Installation sur le robot
+            ```bash
+            # Sur le Raspberry Pi, auto-update via le script intégré
+            curl -L https://github.com/Bot-Bastet/CORE/releases/download/${{ steps.version.outputs.VERSION }}/core-embedded-${{ steps.version.outputs.VERSION }}.zip -o core.zip
+            unzip core.zip -d ~/ros2_ws/
+            cd ~/ros2_ws && colcon build
+            ```
+          files: |
+            core-embedded-${{ steps.version.outputs.VERSION }}.zip
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-beta') || contains(steps.version.outputs.VERSION, '-rc') }}
