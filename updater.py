@@ -7,7 +7,11 @@ import os
 import subprocess
 import requests
 import logging
+import socket
 from pathlib import Path
+
+# Set global socket timeout to prevent hangs
+socket.setdefaulttimeout(30.0)
 
 logger = logging.getLogger("core_auto_updater")
 
@@ -157,6 +161,7 @@ def check_and_apply_update() -> bool:
 
     except Exception as e:
         logger.error(f"[AutoUpdater] Erreur lors de la mise à jour : {e}")
+        report_progress("failed", 0)
         return False
 
 

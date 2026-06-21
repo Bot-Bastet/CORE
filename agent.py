@@ -11,7 +11,11 @@ import urllib.request
 import subprocess
 import threading
 import ssl
+import socket
 from pathlib import Path
+
+# Set global socket timeout to prevent hangs
+socket.setdefaulttimeout(30.0)
 
 # Config
 GATEWAY_URL = "https://ha.arthonetwork.fr:44888"
@@ -104,6 +108,29 @@ def trigger_updater():
     except Exception as e:
         print(f"[Agent] Erreur lancement updater : {e}")
 
+def check_camera_connected(cam_id: int) -> bool:
+    """Vérifie si la caméra physique est connectée au système."""
+    if cam_id == 1:
+        return os.path.exists("/dev/video0") or os.path.exists("/dev/video1")
+    else:
+        return os.path.exists("/dev/video2") or os.path.exists("/dev/video3") or os.path.exists("/dev/video4")
+
+def is_arduino_connected() -> bool:
+    """Vérifie si le microcontrôleur Arduino Mega est physiquement connecté."""
+    try:
+        import serial.tools.list_ports
+        for p in serial.tools.list_ports.comports():
+            desc = (p.description or '').lower()
+            if 'arduino' in desc or (p.vid == 0x2341 and p.pid in (0x0010, 0x0042)):
+                return True
+    except Exception:
+        pass
+    import glob
+    for pattern in ['/dev/ttyUSB*', '/dev/ttyACM*']:
+        if glob.glob(pattern):
+            return True
+    return False
+
 camera_processes = {
     1: None,
     2: None
@@ -163,6 +190,7 @@ def start_camera_stream(cam_id: int):
         "-vcodec", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
+        "-pix_fmt", "yuv420p",
         "-g", "30",
         "-bf", "0",
         "-f", "rtsp",
@@ -413,7 +441,9 @@ def get_wifi_list() -> list:
             if ssid not in unique_networks or net["signal"] > unique_networks[ssid]["signal"]:
                 unique_networks[ssid] = net
                 
-        return list(unique_networks.values())
+        # Sort by signal strength (highest first)
+        sorted_networks = sorted(list(unique_networks.values()), key=lambda x: x["signal"], reverse=True)
+        return sorted_networks
     except Exception as e:
         print(f"[Agent] Erreur scan wifi wpa: {e}")
         return []
@@ -488,7 +518,10 @@ def update_status_loop():
                     "temp_c": metrics.get("cpu_temp", 0.0),
                     "spotbot_service_active": active,
                     "system": metrics,
-                    "spotbot_service": "active" if active else "inactive"
+                    "spotbot_service": "active" if active else "inactive",
+                    "cam1_connected": check_camera_connected(1),
+                    "cam2_connected": check_camera_connected(2),
+                    "arduino_connected": is_arduino_connected()
                 },
                 "ai_state": {
                     "tts": tts_target,
