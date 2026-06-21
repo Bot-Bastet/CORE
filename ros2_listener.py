@@ -2,6 +2,7 @@ import sys
 import json
 import time
 import math
+import queue
 import threading
 import subprocess
 import rclpy
@@ -21,6 +22,8 @@ class ROS2TelemetryListener(Node):
         self.topics_list = []
         self.cam_subscribers = {1: None, 2: None}
         self.cam_processes = {1: None, 2: None}
+        self.cam_queues = {1: None, 2: None}
+        self.cam_threads = {1: None, 2: None}
         
         # Subscriptions
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
@@ -131,6 +134,14 @@ class ROS2TelemetryListener(Node):
 
     def start_cam_stream(self, cam_id):
         self.stop_cam_stream(cam_id)
+        self.cam_queues[cam_id] = queue.Queue(maxsize=1)
+        self.cam_threads[cam_id] = threading.Thread(
+            target=self.ffmpeg_worker,
+            args=(cam_id,),
+            daemon=True
+        )
+        self.cam_threads[cam_id].start()
+
         topics = ["/camera/image_raw", "/camera/left/image_raw"] if cam_id == 1 else ["/camera2/image_raw", "/camera/right/image_raw"]
         self.cam_subscribers[cam_id] = []
         for topic in topics:
@@ -143,14 +154,23 @@ class ROS2TelemetryListener(Node):
             self.cam_subscribers[cam_id].append(sub)
 
     def stop_cam_stream(self, cam_id):
+        q = self.cam_queues.get(cam_id)
+        if q is not None:
+            self.cam_queues[cam_id] = None
+            try:
+                q.put_nowait(None) # Sentinel to stop thread
+            except Exception:
+                pass
+
         if self.cam_processes[cam_id] is not None:
             try:
                 self.cam_processes[cam_id].stdin.close()
                 self.cam_processes[cam_id].terminate()
-                self.cam_processes[cam_id].wait(timeout=2)
+                self.cam_processes[cam_id].wait(timeout=1)
             except Exception:
                 pass
             self.cam_processes[cam_id] = None
+
         if self.cam_subscribers[cam_id] is not None:
             if isinstance(self.cam_subscribers[cam_id], list):
                 for sub in self.cam_subscribers[cam_id]:
@@ -161,50 +181,83 @@ class ROS2TelemetryListener(Node):
             self.cam_subscribers[cam_id] = None
 
     def image_callback(self, msg, cam_id):
-        if self.cam_processes[cam_id] is None:
-            enc = msg.encoding
-            pix_fmt = "rgb24"
-            if enc == "rgb8":
+        q = self.cam_queues.get(cam_id)
+        if q is not None:
+            frame_data = {
+                "width": msg.width,
+                "height": msg.height,
+                "encoding": msg.encoding,
+                "data": bytes(msg.data)
+            }
+            try:
+                q.put_nowait(frame_data)
+            except queue.Full:
+                pass # Drop frame to save CPU and avoid blocking callback thread
+
+    def ffmpeg_worker(self, cam_id):
+        while True:
+            q = self.cam_queues.get(cam_id)
+            if q is None:
+                break
+            try:
+                frame = q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            if frame is None:
+                q.task_done()
+                break
+
+            if self.cam_processes[cam_id] is None:
+                enc = frame["encoding"]
                 pix_fmt = "rgb24"
-            elif enc == "bgr8":
-                pix_fmt = "bgr24"
-            elif enc in ("yuyv", "yuyv422"):
-                pix_fmt = "yuyv422"
-            elif enc == "mono8":
-                pix_fmt = "gray"
-                
-            rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f", "rawvideo",
-                "-pix_fmt", pix_fmt,
-                "-s", f"{msg.width}x{msg.height}",
-                "-r", "15",
-                "-i", "-",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-f", "rtsp",
-                "-rtsp_transport", "tcp",
-                rtsp_url
-            ]
-            try:
-                self.cam_processes[cam_id] = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                return
-                
-        if self.cam_processes[cam_id] and self.cam_processes[cam_id].stdin:
-            try:
-                self.cam_processes[cam_id].stdin.write(bytes(msg.data))
-                self.cam_processes[cam_id].stdin.flush()
-            except Exception:
-                self.stop_cam_stream(cam_id)
+                if enc == "rgb8":
+                    pix_fmt = "rgb24"
+                elif enc == "bgr8":
+                    pix_fmt = "bgr24"
+                elif enc in ("yuyv", "yuyv422"):
+                    pix_fmt = "yuyv422"
+                elif enc == "mono8":
+                    pix_fmt = "gray"
+
+                rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-f", "rawvideo",
+                    "-pix_fmt", pix_fmt,
+                    "-s", f"{frame['width']}x{frame['height']}",
+                    "-r", "10",
+                    "-i", "-",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-crf", "32",
+                    "-threads", "2",
+                    "-f", "rtsp",
+                    "-rtsp_transport", "tcp",
+                    rtsp_url
+                ]
+                try:
+                    self.cam_processes[cam_id] = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                except Exception:
+                    q.task_done()
+                    continue
+
+            proc = self.cam_processes[cam_id]
+            if proc and proc.stdin:
+                try:
+                    proc.stdin.write(frame["data"])
+                    proc.stdin.flush()
+                except Exception:
+                    self.stop_cam_stream(cam_id)
+
+            q.task_done()
 
 def main():
     rclpy.init()
