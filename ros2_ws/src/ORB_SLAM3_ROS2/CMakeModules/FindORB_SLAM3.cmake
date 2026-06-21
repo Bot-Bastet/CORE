@@ -2,14 +2,15 @@
 # Set alternative paths to search for using ORB_SLAM3_DIR
 # Once done this will define
 # You should ensure your ORB_SLAM3 can run correctly
-#
-# To help the search ORB_SLAM3_ROOT_DIR environment variable as the path to ORB_SLAM3 root folder
-#  e.g. `set( ORB_SLAM3_ROOT_DIR=~/ORB_SLAM3) `
-set(ORB_SLAM3_ROOT_DIR "~/Install/ORB_SLAM/ORB_SLAM3")
 
-# message(${ORB_SLAM3_ROOT_DIR})
-# message(${ORB_SLAM3_ROOT_DIR}/include)
-# message(${ORB_SLAM3_ROOT_DIR}/Thirdparty/DBoW2/DBoW2)
+# Respect environment variable first, then check common directories
+if(DEFINED ENV{ORB_SLAM3_ROOT_DIR})
+  set(ORB_SLAM3_ROOT_DIR "$ENV{ORB_SLAM3_ROOT_DIR}")
+elseif(EXISTS "/opt/ORB_SLAM3")
+  set(ORB_SLAM3_ROOT_DIR "/opt/ORB_SLAM3")
+else()
+  set(ORB_SLAM3_ROOT_DIR "~/Install/ORB_SLAM/ORB_SLAM3")
+endif()
 
 # Find ORB_SLAM3
 find_path(ORB_SLAM3_INCLUDE_DIR NAMES System.h
@@ -28,8 +29,6 @@ find_library(DBoW2_LIBRARY NAMES DBoW2
 # Find built-in g2o
 find_library(g2o_LIBRARY NAMES g2o
              PATHS ${ORB_SLAM3_ROOT_DIR}/Thirdparty/g2o/lib)
-
-
 
 include(FindPackageHandleStandardArgs)
 # handle the QUIETLY and REQUIRED arguments and set ORB_SLAM3_FOUND to TRUE

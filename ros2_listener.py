@@ -131,13 +131,16 @@ class ROS2TelemetryListener(Node):
 
     def start_cam_stream(self, cam_id):
         self.stop_cam_stream(cam_id)
-        topic = "/camera/image_raw" if cam_id == 1 else "/camera2/image_raw"
-        self.cam_subscribers[cam_id] = self.create_subscription(
-            Image,
-            topic,
-            lambda msg: self.image_callback(msg, cam_id),
-            10
-        )
+        topics = ["/camera/image_raw", "/camera/left/image_raw"] if cam_id == 1 else ["/camera2/image_raw", "/camera/right/image_raw"]
+        self.cam_subscribers[cam_id] = []
+        for topic in topics:
+            sub = self.create_subscription(
+                Image,
+                topic,
+                lambda msg, cid=cam_id: self.image_callback(msg, cid),
+                10
+            )
+            self.cam_subscribers[cam_id].append(sub)
 
     def stop_cam_stream(self, cam_id):
         if self.cam_processes[cam_id] is not None:
@@ -149,7 +152,12 @@ class ROS2TelemetryListener(Node):
                 pass
             self.cam_processes[cam_id] = None
         if self.cam_subscribers[cam_id] is not None:
-            self.destroy_subscription(self.cam_subscribers[cam_id])
+            if isinstance(self.cam_subscribers[cam_id], list):
+                for sub in self.cam_subscribers[cam_id]:
+                    if sub is not None:
+                        self.destroy_subscription(sub)
+            else:
+                self.destroy_subscription(self.cam_subscribers[cam_id])
             self.cam_subscribers[cam_id] = None
 
     def image_callback(self, msg, cam_id):

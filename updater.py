@@ -4,6 +4,7 @@ Vérifie GitHub Releases et effectue git pull + colcon build si une nouvelle ver
 Conçu pour tourner comme un nœud ROS 2 ou un service systemd.
 """
 import os
+import time
 import subprocess
 import requests
 import logging
@@ -19,7 +20,6 @@ GITHUB_REPO = "Bot-Bastet/CORE"
 WORKSPACE_ROOT = Path("/opt/spotbot/ros2_ws")
 CORE_SRC = Path("/opt/spotbot")
 VERSION_FILE = CORE_SRC / "version.txt"
-
 
 API_TOKEN = "bst_c9f28d3a1e4b85c7f0d4b9a2e6f1c3d5"
 
@@ -61,9 +61,10 @@ def report_progress(status: str, percent: int):
 def check_and_apply_update() -> bool:
     """
     Vérifie et applique la mise à jour si disponible.
-    1. Télécharger le .zip de la release
-    2. Extraire dans ~/ros2_ws/src/CORE
-    3. Lancer colcon build
+    1. Télécharger le .zip de la release avec reprise de téléchargement (curl -C -)
+    2. Extraire dans /opt/spotbot
+    3. Lancer colcon build (limité à 1 job et exécution séquentielle pour éviter de surcharger le Pi,
+       avec les arguments cmake pour trouver Sophus).
     4. Mettre à jour version.txt
     Retourne True si une mise à jour a été appliquée.
     """
@@ -97,20 +98,72 @@ def check_and_apply_update() -> bool:
 
     try:
         zip_path = Path("/tmp/core_update.zip")
+        url = zip_asset["browser_download_url"]
 
-        logger.info(f"[AutoUpdater] Téléchargement de {zip_asset['browser_download_url']}...")
-        resp = requests.get(zip_asset["browser_download_url"], stream=True, timeout=120)
-        total_size = int(resp.headers.get("content-length", 0))
-        downloaded = 0
+        logger.info(f"[AutoUpdater] Récupération des informations de téléchargement pour {url}...")
         
+        # Get actual content-length by following redirects
+        total_size = 0
+        try:
+            head_resp = requests.head(url, allow_redirects=True, timeout=15)
+            total_size = int(head_resp.headers.get("content-length", 0))
+        except Exception as e:
+            logger.warning(f"[AutoUpdater] HEAD request failed: {e}. Trying GET...")
+            try:
+                get_resp = requests.get(url, stream=True, timeout=15)
+                total_size = int(get_resp.headers.get("content-length", 0))
+                get_resp.close()
+            except Exception as e2:
+                logger.warning(f"[AutoUpdater] GET headers check failed: {e2}")
+
+        logger.info(f"[AutoUpdater] Taille attendue du fichier : {total_size} octets")
+
+        # Clear existing file if it's larger than expected
+        if zip_path.exists() and total_size > 0 and zip_path.stat().st_size > total_size:
+            logger.info("[AutoUpdater] Le fichier local existant est plus grand que la taille attendue. Suppression...")
+            zip_path.unlink()
+
         report_progress("downloading", 0)
-        with open(zip_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    percent = int((downloaded / total_size) * 100)
-                    report_progress("downloading", percent)
+
+        max_attempts = 10
+        success = False
+        
+        for attempt in range(1, max_attempts + 1):
+            logger.info(f"[AutoUpdater] Tentative de téléchargement {attempt}/{max_attempts}...")
+            
+            # Start curl process with automatic speed timeout and connect timeout
+            process = subprocess.Popen(
+                ["curl", "-L", "-C", "-", "--connect-timeout", "30", "-y", "30", "-Y", "1000", "--retry", "5", "--retry-delay", "5", "-o", str(zip_path), url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            # Monitor progress based on file size on disk
+            while process.poll() is None:
+                if zip_path.exists():
+                    cur_size = zip_path.stat().st_size
+                    if total_size > 0:
+                        percent = min(int((cur_size / total_size) * 100), 99)
+                        report_progress("downloading", percent)
+                time.sleep(1.0)
+                
+            ret_code = process.returncode
+            if ret_code == 0:
+                if zip_path.exists() and (total_size == 0 or zip_path.stat().st_size >= total_size):
+                    logger.info("[AutoUpdater] Téléchargement réussi.")
+                    success = True
+                    break
+                else:
+                    logger.warning("[AutoUpdater] Curl a retourné 0 mais le fichier est incomplet.")
+            else:
+                logger.warning(f"[AutoUpdater] Curl a échoué avec le code {ret_code}.")
+                
+            time.sleep(2.0)
+
+        if not success:
+            raise Exception("Impossible de télécharger la mise à jour après plusieurs tentatives.")
+
+        report_progress("downloading", 100)
 
         # Extraire dans le workspace src
         report_progress("extracting", 100)
@@ -118,14 +171,15 @@ def check_and_apply_update() -> bool:
         subprocess.run(["unzip", "-o", str(zip_path), "-d", str(CORE_SRC)], check=True)
         zip_path.unlink()
 
-        # Rebuild ROS 2
+        # Rebuild ROS 2 (exécuté en tant que root pour éviter les conflits de permission)
         report_progress("compiling", 0)
-        logger.info("[AutoUpdater] Compilation colcon build...")
+        logger.info("[AutoUpdater] Compilation colcon build (sécurisée)...")
         env = os.environ.copy()
         env["PATH"] = "/opt/ros2_jazzy/install/bin:" + env.get("PATH", "")
+        env["MAKEFLAGS"] = "-j1"
         
         process = subprocess.Popen(
-            ["sudo", "-u", "tealo", "bash", "-c", "source /opt/ros2_jazzy/install/setup.bash && colcon build --symlink-install"],
+            ["bash", "-c", "source /opt/ros2_jazzy/install/setup.bash && colcon build --symlink-install --executor sequential --cmake-args -DSophus_DIR=/opt/ORB_SLAM3/Thirdparty/Sophus/build"],
             cwd=str(WORKSPACE_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

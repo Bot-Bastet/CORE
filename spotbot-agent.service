@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 /opt/spotbot/agent.py
+ExecStart=/usr/bin/python3 -u /opt/spotbot/agent.py
 Restart=always
 RestartSec=5
 
