@@ -102,13 +102,17 @@ class ROS2TelemetryListener(Node):
             pass
             
     def publish_telemetry(self):
+        import os
+        has_cam1 = os.path.exists("/dev/video0") or os.path.exists("/dev/video1")
+        has_cam2 = os.path.exists("/dev/video2") or os.path.exists("/dev/video3") or os.path.exists("/dev/video4")
         data = {
             "type": "telemetry_diagnostics",
             "joints": self.joints,
             "imu": self.imu,
             "pose": self.pose,
             "path": self.path,
-            "topics": self.topics_list
+            "topics": self.topics_list,
+            "cameras": {"cam1": has_cam1, "cam2": has_cam2}
         }
         print(json.dumps(data))
         sys.stdout.flush()
@@ -125,14 +129,15 @@ class ROS2TelemetryListener(Node):
                         self.calib_pub.publish(cal_msg)
                 elif msg_json.get("type") == "start_camera":
                     cam_id = msg_json.get("camera", 1)
-                    self.start_cam_stream(cam_id)
+                    v_slam = msg_json.get("v_slam", False)
+                    self.start_cam_stream(cam_id, v_slam)
                 elif msg_json.get("type") == "stop_camera":
                     cam_id = msg_json.get("camera", 1)
                     self.stop_cam_stream(cam_id)
             except Exception:
                 pass
 
-    def start_cam_stream(self, cam_id):
+    def start_cam_stream(self, cam_id, v_slam=False):
         self.stop_cam_stream(cam_id)
         self.cam_queues[cam_id] = queue.Queue(maxsize=1)
         self.cam_threads[cam_id] = threading.Thread(
@@ -142,7 +147,10 @@ class ROS2TelemetryListener(Node):
         )
         self.cam_threads[cam_id].start()
 
-        topics = ["/camera/image_raw", "/camera/left/image_raw"] if cam_id == 1 else ["/camera2/image_raw", "/camera/right/image_raw"]
+        if cam_id == 1 and v_slam:
+            topics = ["/orb_slam3/tracking_image"]
+        else:
+            topics = ["/camera/image_raw", "/camera/left/image_raw"] if cam_id == 1 else ["/camera2/image_raw", "/camera/right/image_raw"]
         self.cam_subscribers[cam_id] = []
         for topic in topics:
             sub = self.create_subscription(
@@ -228,22 +236,26 @@ class ROS2TelemetryListener(Node):
                     "-pix_fmt", pix_fmt,
                     "-s", f"{frame['width']}x{frame['height']}",
                     "-r", "10",
+                    "-probesize", "32",
+                    "-analyzeduration", "0",
                     "-i", "-",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
                     "-tune", "zerolatency",
                     "-crf", "32",
                     "-threads", "2",
+                    "-pix_fmt", "yuv420p",
                     "-f", "rtsp",
                     "-rtsp_transport", "tcp",
                     rtsp_url
                 ]
                 try:
+                    log_file = open(f"/tmp/ffmpeg_cam{cam_id}.log", "w")
                     self.cam_processes[cam_id] = subprocess.Popen(
                         cmd,
                         stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=log_file
                     )
                 except Exception:
                     q.task_done()

@@ -20,30 +20,41 @@ source /opt/spotbot/ros2_ws/install/setup.bash
 echo "[SpotBot] $(date) — Starting..." | tee $LOG/startup.log
 
 # 1. Cameras
-# Camera 1 (/dev/video0)
+# Camera 1 (Left /dev/video0)
 fuser -k /dev/video0 2>/dev/null || true
 sleep 1
 ros2 run usb_cam usb_cam_node_exe --ros-args \
   -r __node:=usb_cam1 \
   -p video_device:=/dev/video0 -p pixel_format:=yuyv2rgb \
-  -p image_width:=640 -p image_height:=480 -p framerate:=15.0 \
+  -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
   -p camera_info_url:=file:///opt/spotbot/config/camera_calibration.yaml \
   -p camera_name:=usb_cam1 -p frame_id:=camera_link \
   -r image_raw:=/camera/left/image_raw -r camera_info:=/camera/left/camera_info \
   >> $LOG/camera1.log 2>&1 &
 
-# Camera 2 (/dev/video2)
-fuser -k /dev/video2 2>/dev/null || true
-sleep 1
-ros2 run usb_cam usb_cam_node_exe --ros-args \
-  -r __node:=usb_cam2 \
-  -p video_device:=/dev/video2 -p pixel_format:=yuyv2rgb \
-  -p image_width:=640 -p image_height:=480 -p framerate:=15.0 \
-  -p camera_name:=usb_cam2 -p frame_id:=camera2_link \
-  -r image_raw:=/camera/right/image_raw -r camera_info:=/camera/right/camera_info \
-  >> $LOG/camera2.log 2>&1 &
-
-echo "[SpotBot] Cameras OK" | tee -a $LOG/startup.log
+# Camera 2 (Right /dev/video2) - only if detected
+if [ -e /dev/video2 ] || [ -e /dev/video3 ] || [ -e /dev/video4 ]; then
+    # Determine the actual right camera device file (usually /dev/video2)
+    if [ -e /dev/video2 ]; then
+        CAM2_DEV=/dev/video2
+    elif [ -e /dev/video3 ]; then
+        CAM2_DEV=/dev/video3
+    else
+        CAM2_DEV=/dev/video4
+    fi
+    fuser -k $CAM2_DEV 2>/dev/null || true
+    sleep 1
+    ros2 run usb_cam usb_cam_node_exe --ros-args \
+      -r __node:=usb_cam2 \
+      -p video_device:=$CAM2_DEV -p pixel_format:=yuyv2rgb \
+      -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
+      -p camera_name:=usb_cam2 -p frame_id:=camera2_link \
+      -r image_raw:=/camera/right/image_raw -r camera_info:=/camera/right/camera_info \
+      >> $LOG/camera2.log 2>&1 &
+    echo "[SpotBot] Camera 2 OK ($CAM2_DEV)" | tee -a $LOG/startup.log
+else
+    echo "[SpotBot] Camera 2 not detected" | tee -a $LOG/startup.log
+fi
 
 # 2. TF
 ros2 run tf2_ros static_transform_publisher \
