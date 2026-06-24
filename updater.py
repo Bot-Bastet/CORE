@@ -200,16 +200,7 @@ def check_and_apply_update() -> bool:
             report_progress("failed", 0)
             raise Exception(f"colcon build failed with code {process.returncode}")
 
-        # Installer/mettre à jour le service agent
-        agent_svc = CORE_SRC / "spotbot-agent.service"
-        if agent_svc.exists():
-            logger.info("[AutoUpdater] Installation de spotbot-agent.service...")
-            subprocess.run(["cp", str(agent_svc), "/etc/systemd/system/"], check=True)
-            subprocess.run(["systemctl", "daemon-reload"], check=True)
-            subprocess.run(["systemctl", "enable", "spotbot-agent.service"], check=True)
-            subprocess.run(["systemctl", "restart", "spotbot-agent.service"], check=True)
-
-        # Corriger et redémarrer bastet-tunnel.service pour utiliser le nouveau nom de domaine de la gateway
+        # 1. Corriger et redémarrer bastet-tunnel.service pour utiliser le nouveau nom de domaine de la gateway
         tunnel_path = Path("/etc/systemd/system/bastet-tunnel.service")
         if tunnel_path.exists():
             logger.info("[AutoUpdater] Correction de bastet-tunnel.service...")
@@ -225,8 +216,18 @@ def check_and_apply_update() -> bool:
             except Exception as e_tunnel:
                 logger.error(f"[AutoUpdater] Impossible de corriger bastet-tunnel.service : {e_tunnel}")
 
+        # 2. Mettre à jour version.txt
         VERSION_FILE.write_text(latest_tag)
         logger.info(f"[AutoUpdater] Mise à jour {latest_tag} appliquée avec succès.")
+
+        # 3. Installer/mettre à jour le service agent et le redémarrer en dernier (ce qui tuera ce script)
+        agent_svc = CORE_SRC / "spotbot-agent.service"
+        if agent_svc.exists():
+            logger.info("[AutoUpdater] Installation de spotbot-agent.service...")
+            subprocess.run(["cp", str(agent_svc), "/etc/systemd/system/"], check=True)
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            subprocess.run(["systemctl", "enable", "spotbot-agent.service"], check=True)
+            subprocess.run(["systemctl", "restart", "spotbot-agent.service"], check=True)
         return True
 
     except Exception as e:
