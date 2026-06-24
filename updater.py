@@ -209,6 +209,22 @@ def check_and_apply_update() -> bool:
             subprocess.run(["systemctl", "enable", "spotbot-agent.service"], check=True)
             subprocess.run(["systemctl", "restart", "spotbot-agent.service"], check=True)
 
+        # Corriger et redémarrer bastet-tunnel.service pour utiliser le nouveau nom de domaine de la gateway
+        tunnel_path = Path("/etc/systemd/system/bastet-tunnel.service")
+        if tunnel_path.exists():
+            logger.info("[AutoUpdater] Correction de bastet-tunnel.service...")
+            try:
+                content = tunnel_path.read_text()
+                if "79.94.238.213" in content:
+                    logger.info("[AutoUpdater] Remplacement de l'ancienne IP dans bastet-tunnel.service...")
+                    new_content = content.replace("79.94.238.213", "ha.arthonetwork.fr")
+                    tunnel_path.write_text(new_content)
+                    subprocess.run(["systemctl", "daemon-reload"], check=True)
+                    subprocess.run(["systemctl", "restart", "bastet-tunnel.service"], check=True)
+                    logger.info("[AutoUpdater] bastet-tunnel.service corrigé et redémarré.")
+            except Exception as e_tunnel:
+                logger.error(f"[AutoUpdater] Impossible de corriger bastet-tunnel.service : {e_tunnel}")
+
         VERSION_FILE.write_text(latest_tag)
         logger.info(f"[AutoUpdater] Mise à jour {latest_tag} appliquée avec succès.")
         return True

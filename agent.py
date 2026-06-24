@@ -458,36 +458,72 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
             with open(conf_path, "r") as f:
                 content = f.read()
                 
-        # Strip existing blocks for this SSID
-        blocks = content.split("network={")
-        new_blocks = [blocks[0]]
-        for block in blocks[1:]:
-            brace_idx = block.find("}")
-            if brace_idx != -1:
-                block_content = block[:brace_idx]
-                rest = block[brace_idx:]
-                if f'ssid="{ssid}"' in block_content or f"ssid='{ssid}'" in block_content:
-                    new_blocks[0] += rest.lstrip("}").lstrip("\n")
-                    continue
-            new_blocks.append("network={" + block)
+        # Check if SSID exists in wpa_supplicant.conf
+        ssid_exists = False
+        if f'ssid="{ssid}"' in content or f"ssid='{ssid}'" in content:
+            ssid_exists = True
+
+        if not password and ssid_exists:
+            # Reconfigure first to make sure wpa_supplicant knows about all configured networks
+            subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
+            # Find the network id from wpa_cli list_networks
+            res_list = subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "list_networks"], capture_output=True, text=True)
+            net_id = None
+            for line in res_list.stdout.split("\n"):
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1].strip("\"'") == ssid:
+                    net_id = parts[0]
+                    break
             
-        new_content = "".join(new_blocks).strip() + "\n\n"
-        if password:
-            new_network = f'network={{\n\tssid="{ssid}"\n\tpsk="{password}"\n}}\n'
+            if net_id is not None:
+                # Select the network to force association
+                subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "select_network", net_id], check=True)
+            else:
+                return {"status": "error", "message": f"Réseau enregistré '{ssid}' introuvable dans wpa_cli."}
         else:
-            new_network = f'network={{\n\tssid="{ssid}"\n\tkey_mgmt=NONE\n}}\n'
+            # Strip existing blocks for this SSID and write the new one
+            blocks = content.split("network={")
+            new_blocks = [blocks[0]]
+            for block in blocks[1:]:
+                brace_idx = block.find("}")
+                if brace_idx != -1:
+                    block_content = block[:brace_idx]
+                    rest = block[brace_idx:]
+                    if f'ssid="{ssid}"' in block_content or f"ssid='{ssid}'" in block_content:
+                        new_blocks[0] += rest.lstrip("}").lstrip("\n")
+                        continue
+                new_blocks.append("network={" + block)
+                
+            new_content = "".join(new_blocks).strip() + "\n\n"
+            if password:
+                new_network = f'network={{\n\tssid="{ssid}"\n\tpsk="{password}"\n}}\n'
+            else:
+                new_network = f'network={{\n\tssid="{ssid}"\n\tkey_mgmt=NONE\n}}\n'
+                
+            new_content += new_network
+            with open(conf_path, "w") as f:
+                f.write(new_content)
+                
+            # Reconfigure wpa_supplicant
+            subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
             
-        new_content += new_network
-        with open(conf_path, "w") as f:
-            f.write(new_content)
-            
-        # Reconfigure wpa_supplicant
-        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
+            # Find net_id to select it
+            res_list = subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "list_networks"], capture_output=True, text=True)
+            net_id = None
+            for line in res_list.stdout.split("\n"):
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1].strip("\"'") == ssid:
+                    net_id = parts[0]
+                    break
+            if net_id is not None:
+                subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "select_network", net_id], check=True)
         
         # Wait up to 12s for connection to establish
         for _ in range(12):
             res = subprocess.run(["ip", "addr", "show", "wlan0"], capture_output=True, text=True)
             if "inet " in res.stdout:
+                # Ensure we also enable all other configured networks so failover works later
+                subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "enable_network", "all"], capture_output=True)
                 return {"status": "success", "message": f"Connecté à {ssid} avec succès."}
             time.sleep(1)
             
@@ -654,7 +690,24 @@ def start_websocket_client():
                                 elif msg_type == "scan_wifi":
                                     print("[Agent] Commande de scan WiFi reçue !")
                                     networks = get_wifi_list()
-                                    await ws.send(json.dumps({"type": "wifi_list", "networks": networks}))
+                                    known_ssids = []
+                                    conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
+                                    if os.path.exists(conf_path):
+                                        try:
+                                            import re
+                                            with open(conf_path, "r") as f:
+                                                content = f.read()
+                                            ssids = re.findall(r'ssid=["\']([^"\']+)["\']', content)
+                                            for s in ssids:
+                                                if s not in known_ssids:
+                                                    known_ssids.append(s)
+                                        except Exception as e_wpa:
+                                            print(f"[Agent] Erreur lecture wpa_supplicant.conf : {e_wpa}")
+                                    await ws.send(json.dumps({
+                                        "type": "wifi_list",
+                                        "networks": networks,
+                                        "known_ssids": known_ssids
+                                    }))
                                     
                                 elif msg_type == "connect_wifi":
                                     ssid = data.get("ssid")
