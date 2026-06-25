@@ -87,9 +87,14 @@ def check_and_apply_update() -> bool:
 
     zip_asset = None
     for asset in release.get("assets", []):
-        if asset["name"].endswith(".zip"):
+        if "core-embedded" in asset["name"] and asset["name"].endswith(".zip"):
             zip_asset = asset
             break
+    if not zip_asset:
+        for asset in release.get("assets", []):
+            if asset["name"].endswith(".zip") and "arduino" not in asset["name"]:
+                zip_asset = asset
+                break
 
     if not zip_asset:
         logger.warning("[AutoUpdater] Aucun asset .zip trouvé dans la release.")
