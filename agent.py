@@ -36,8 +36,8 @@ latest_telemetry = None
 tts_target = "robot"
 stt_target = "robot"
 chat_target = "robot"
-yolo_state = "disabled"
-face_rec_state = "disabled"
+yolo_state = "robot"
+face_rec_state = "robot"
 
 def get_version() -> str:
     if VERSION_FILE.exists():
@@ -207,10 +207,12 @@ def start_camera_stream(cam_id: int):
         "-vcodec", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
+        "-profile:v", "baseline",
+        "-level", "3.0",
         "-crf", "32",
         "-threads", "2",
         "-pix_fmt", "yuv420p",
-        "-g", "30",
+        "-g", "10",
         "-bf", "0",
         "-f", "rtsp",
         "-rtsp_transport", "tcp",
@@ -715,6 +717,13 @@ def start_websocket_client():
                                     if ros2_process and ros2_process.stdin:
                                         ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
+
+                                elif msg_type == "arduino_cmd":
+                                    cmd = data.get("cmd", "")
+                                    print(f"[Agent] Commande Arduino reçue : {cmd}")
+                                    if ros2_process and ros2_process.stdin:
+                                        ros2_process.stdin.write(json.dumps({"type": "arduino_cmd", "cmd": cmd}) + "\n")
+                                        ros2_process.stdin.flush()
                                         
                                 elif msg_type == "manual_joint_control":
                                     if ros2_process and ros2_process.stdin:
@@ -784,9 +793,9 @@ def start_websocket_client():
                                             stt_target = "robot"
                                             chat_target = "robot"
                                     elif feature == "yolo":
-                                        yolo_state = "enabled" if state else "disabled"
+                                        yolo_state = "node" if state else "robot"
                                     elif feature == "face_rec":
-                                        face_rec_state = "enabled" if state else "disabled"
+                                        face_rec_state = "node" if state else "robot"
                                         
                                     if latest_telemetry and "ai_state" in latest_telemetry:
                                         latest_telemetry["ai_state"] = {
@@ -797,10 +806,18 @@ def start_websocket_client():
                                             "face_rec": face_rec_state
                                         }
                                         
+                                    ack_state = state
+                                    if feature == "yolo":
+                                        ack_state = (yolo_state == "node")
+                                    elif feature == "face_rec":
+                                        ack_state = (face_rec_state == "node")
+                                    elif feature == "audio":
+                                        ack_state = (tts_target == "node" or stt_target == "node" or chat_target == "node")
+
                                     ack_msg = {
                                         "type": "feature_ack",
                                         "feature": feature,
-                                        "state": state,
+                                        "state": ack_state,
                                         "status": "ok"
                                     }
                                     await ws.send(json.dumps(ack_msg))
@@ -844,7 +861,7 @@ def start_websocket_client():
                                         ack_msg = {
                                             "type": "feature_ack",
                                             "feature": "yolo",
-                                            "state": (yolo_state == "enabled"),
+                                            "state": (yolo_state == "node"),
                                             "status": "ok"
                                         }
                                         await ws.send(json.dumps(ack_msg))
@@ -852,7 +869,7 @@ def start_websocket_client():
                                         ack_msg = {
                                             "type": "feature_ack",
                                             "feature": "face_rec",
-                                            "state": (face_rec_state == "enabled"),
+                                            "state": (face_rec_state == "node"),
                                             "status": "ok"
                                         }
                                         await ws.send(json.dumps(ack_msg))

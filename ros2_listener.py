@@ -9,7 +9,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState, Imu, Image
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, String
 
 class ROS2TelemetryListener(Node):
     def __init__(self):
@@ -33,6 +33,7 @@ class ROS2TelemetryListener(Node):
         # Publisher for calibration offsets
         self.calib_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_calibration', 10)
         self.angles_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_angles', 10)
+        self.motion_pub = self.create_publisher(String, '/cmd_motion', 10)
         
         # Timer to print state to stdout as JSON (2 Hz)
         self.create_timer(0.5, self.publish_telemetry)
@@ -156,6 +157,12 @@ class ROS2TelemetryListener(Node):
                         ang_msg = Float32MultiArray()
                         ang_msg.data = [float(x) for x in angles]
                         self.angles_pub.publish(ang_msg)
+                elif msg_json.get("type") == "arduino_cmd":
+                    cmd = msg_json.get("cmd", "")
+                    if cmd:
+                        motion_msg = String()
+                        motion_msg.data = cmd
+                        self.motion_pub.publish(motion_msg)
                 elif msg_json.get("type") == "start_camera":
                     cam_id = msg_json.get("camera", 1)
                     v_slam = msg_json.get("v_slam", False)
@@ -271,6 +278,10 @@ class ROS2TelemetryListener(Node):
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
                     "-tune", "zerolatency",
+                    "-profile:v", "baseline",
+                    "-level", "3.0",
+                    "-g", "10",
+                    "-bf", "0",
                     "-crf", "32",
                     "-threads", "2",
                     "-pix_fmt", "yuv420p",
