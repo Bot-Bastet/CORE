@@ -268,86 +268,226 @@ def report_arduino_progress(status: str, percent: int):
     except Exception as e:
         print(f"[Agent] Erreur envoi progrès Arduino : {e}")
 
+def _ensure_arduino_cli() -> bool:
+    """Vérifie que arduino-cli est disponible, l'installe sinon."""
+    try:
+        r = subprocess.run(["arduino-cli", "version"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            print(f"[Agent] arduino-cli OK : {r.stdout.strip()}")
+            return True
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[Agent] arduino-cli check error: {e}")
+
+    print("[Agent] arduino-cli introuvable — installation...")
+    try:
+        install = subprocess.run(
+            "curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh",
+            shell=True, capture_output=True, text=True, timeout=120,
+            env={**__import__('os').environ, "BINDIR": "/usr/local/bin"}
+        )
+        if install.returncode == 0:
+            print("[Agent] arduino-cli installé.")
+            return True
+        print(f"[Agent] Echec install arduino-cli: {install.stderr}")
+        return False
+    except Exception as e:
+        print(f"[Agent] Exception install arduino-cli: {e}")
+        return False
+
+def _ensure_arduino_core() -> bool:
+    """Vérifie que le core arduino:avr est installé."""
+    try:
+        r = subprocess.run(
+            ["arduino-cli", "core", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        if "arduino:avr" in r.stdout:
+            print("[Agent] Core arduino:avr déjà installé.")
+            return True
+    except Exception:
+        pass
+
+    print("[Agent] Installation du core arduino:avr...")
+    try:
+        r = subprocess.run(
+            ["arduino-cli", "core", "update-index"],
+            capture_output=True, text=True, timeout=60
+        )
+        r2 = subprocess.run(
+            ["arduino-cli", "core", "install", "arduino:avr"],
+            capture_output=True, text=True, timeout=300
+        )
+        if r2.returncode == 0:
+            print("[Agent] Core arduino:avr installé.")
+            return True
+        print(f"[Agent] Echec install core: {r2.stderr}")
+        return False
+    except Exception as e:
+        print(f"[Agent] Exception install core: {e}")
+        return False
+
+def _ensure_arduino_lib(lib_name: str) -> bool:
+    """Vérifie qu'une librairie arduino est installée."""
+    try:
+        r = subprocess.run(
+            ["arduino-cli", "lib", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        if lib_name.lower().replace(" ", "") in r.stdout.lower().replace(" ", ""):
+            print(f"[Agent] Lib '{lib_name}' déjà installée.")
+            return True
+    except Exception:
+        pass
+
+    print(f"[Agent] Installation librairie '{lib_name}'...")
+    try:
+        r = subprocess.run(
+            ["arduino-cli", "lib", "install", lib_name],
+            capture_output=True, text=True, timeout=120
+        )
+        if r.returncode == 0:
+            print(f"[Agent] Lib '{lib_name}' installée.")
+            return True
+        print(f"[Agent] Echec install lib: {r.stderr}")
+        return False
+    except Exception as e:
+        print(f"[Agent] Exception install lib: {e}")
+        return False
+
 def flash_arduino_task():
-    print("[Agent] Début de la mise à jour/flash Arduino...")
-    report_arduino_progress("stopping_services", 10)
-    
+    print("[Agent] ═══ Début flash Arduino ═══")
+    report_arduino_progress("stopping_services", 5)
+
     was_active = is_spotbot_service_active()
     if was_active:
         print("[Agent] Arrêt de spotbot.service...")
-        subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"])
-        
+        subprocess.run(["sudo", "systemctl", "stop", "spotbot.service"], timeout=15)
+
     try:
         import glob
+
+        # ── 1. Vérification arduino-cli ────────────────────────────────────
+        report_arduino_progress("checking_tools", 10)
+        if not _ensure_arduino_cli():
+            report_arduino_progress("failed_no_cli", 0)
+            return
+
+        # ── 2. Core AVR ────────────────────────────────────────────────────
+        report_arduino_progress("installing_core", 15)
+        if not _ensure_arduino_core():
+            report_arduino_progress("failed_no_core", 0)
+            return
+
+        # ── 3. Librairies requises ─────────────────────────────────────────
+        report_arduino_progress("installing_libs", 20)
+        _ensure_arduino_lib("SparkFun BNO08x Arduino Library")
+        _ensure_arduino_lib("Servo")
+
+        # ── 4. Détection port Arduino ──────────────────────────────────────
+        report_arduino_progress("detecting_device", 25)
         port = None
         try:
             import serial.tools.list_ports
             for p in serial.tools.list_ports.comports():
                 desc = (p.description or '').lower()
-                if 'arduino' in desc or (p.vid == 0x2341 and p.pid in (0x0010, 0x0042)):
+                if 'arduino' in desc or (p.vid == 0x2341 and p.pid in (0x0010, 0x0042, 0x0043, 0x0044)):
                     port = p.device
+                    print(f"[Agent] Arduino détecté via pyserial : {port} (VID={hex(p.vid) if p.vid else 'N/A'})")
                     break
-        except Exception:
-            pass
-            
+        except Exception as e:
+            print(f"[Agent] pyserial error: {e}")
+
         if not port:
-            for pattern in ['/dev/ttyUSB*', '/dev/ttyACM*']:
+            for pattern in ['/dev/ttyACM*', '/dev/ttyUSB*']:
                 ports = sorted(glob.glob(pattern))
                 if ports:
                     port = ports[0]
+                    print(f"[Agent] Arduino détecté via glob : {port}")
                     break
-                    
+
         if not port:
-            print("[Agent] Arduino non trouvé.")
+            print("[Agent] ✗ Aucun Arduino trouvé. Vérifiez le câble USB.")
             report_arduino_progress("failed_no_device", 0)
             return
 
-        print(f"[Agent] Arduino trouvé sur {port}")
-        report_arduino_progress("compiling", 30)
+        # ── 5. Copie du sketch vers le Pi ──────────────────────────────────
+        report_arduino_progress("preparing_sketch", 30)
+        sketch_src  = Path(__file__).parent / "arduino" / "spotbot_controller"
+        sketch_dest = Path("/opt/spotbot/arduino/spotbot_controller")
+        build_path  = Path("/tmp/spotbot_arduino_build")
 
-        sketch_path = "/opt/spotbot/arduino/spotbot_controller"
-        build_path = "/tmp/spotbot_arduino_build"
-        
+        sketch_dest.parent.mkdir(parents=True, exist_ok=True)
+        build_path.mkdir(parents=True, exist_ok=True)
+
+        if sketch_src.exists():
+            import shutil
+            if sketch_dest.exists():
+                shutil.rmtree(sketch_dest)
+            shutil.copytree(sketch_src, sketch_dest)
+            print(f"[Agent] Sketch copié vers {sketch_dest}")
+        elif not sketch_dest.exists():
+            print(f"[Agent] ✗ Sketch introuvable : {sketch_src} ni {sketch_dest}")
+            report_arduino_progress("failed_no_sketch", 0)
+            return
+        else:
+            print(f"[Agent] Utilisation du sketch existant sur {sketch_dest}")
+
+        # ── 6. Compilation ─────────────────────────────────────────────────
+        report_arduino_progress("compiling", 45)
+        print(f"[Agent] Compilation de {sketch_dest}...")
         comp_res = subprocess.run([
             "arduino-cli", "compile",
             "--fqbn", "arduino:avr:mega",
-            "--build-path", build_path,
-            sketch_path
-        ], capture_output=True, text=True)
-        
-        if comp_res.returncode != 0:
-            print(f"[Agent] Erreur compilation : {comp_res.stderr}")
-            report_arduino_progress("failed_compilation", 0)
-            return
+            "--build-path", str(build_path),
+            str(sketch_dest)
+        ], capture_output=True, text=True, timeout=300)
 
-        report_arduino_progress("flashing", 70)
-        
+        if comp_res.returncode != 0:
+            print(f"[Agent] ✗ Erreur compilation:\n{comp_res.stderr}")
+            report_arduino_progress(f"failed_compilation: {comp_res.stderr[:200]}", 0)
+            return
+        print("[Agent] ✓ Compilation réussie.")
+
+        # ── 7. Upload ──────────────────────────────────────────────────────
+        report_arduino_progress("flashing", 75)
+        print(f"[Agent] Upload sur {port}...")
         upload_res = subprocess.run([
             "arduino-cli", "upload",
             "--fqbn", "arduino:avr:mega",
             "--port", port,
-            "--input-dir", build_path
-        ], capture_output=True, text=True)
-        
-        if upload_res.returncode != 0:
-            print(f"[Agent] Erreur flashage : {upload_res.stderr}")
-            report_arduino_progress("failed_flash", 0)
-            return
+            "--input-dir", str(build_path)
+        ], capture_output=True, text=True, timeout=120)
 
+        if upload_res.returncode != 0:
+            print(f"[Agent] ✗ Erreur upload:\n{upload_res.stderr}")
+            report_arduino_progress(f"failed_flash: {upload_res.stderr[:200]}", 0)
+            return
+        print("[Agent] ✓ Upload réussi.")
+
+        # ── 8. Sauvegarde version ──────────────────────────────────────────
         version = get_version()
+        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         ARDUINO_VERSION_FILE.write_text(version)
-        
-        print("[Agent] Flash Arduino réussi !")
+        print(f"[Agent] ✓ Version Arduino enregistrée : {version}")
+
         report_arduino_progress("idle", 100)
-        
+        print("[Agent] ═══ Flash Arduino terminé avec succès ! ═══")
+
+    except subprocess.TimeoutExpired as e:
+        print(f"[Agent] ✗ Timeout : {e}")
+        report_arduino_progress("failed_timeout", 0)
     except Exception as e:
-        print(f"[Agent] Erreur générale flash Arduino : {e}")
+        print(f"[Agent] ✗ Erreur générale flash : {e}")
+        import traceback
+        traceback.print_exc()
         report_arduino_progress("failed_error", 0)
-        
+
     finally:
         if was_active:
             print("[Agent] Redémarrage de spotbot.service...")
-            subprocess.run(["sudo", "systemctl", "start", "spotbot.service"])
+            subprocess.run(["sudo", "systemctl", "start", "spotbot.service"], timeout=15)
 
 def trigger_arduino_flash():
     threading.Thread(target=flash_arduino_task, daemon=True).start()
