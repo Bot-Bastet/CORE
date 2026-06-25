@@ -460,7 +460,14 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
                 
         # Check if SSID exists in wpa_supplicant.conf
         ssid_exists = False
-        if f'ssid="{ssid}"' in content or f"ssid='{ssid}'" in content:
+        ssids = []
+        for line in content.splitlines():
+            line = line.strip()
+            if "=" in line:
+                parts = line.split("=", 1)
+                if parts[0].strip() == "ssid":
+                    ssids.append(parts[1].strip().strip("\"'"))
+        if ssid in ssids:
             ssid_exists = True
 
         if not password and ssid_exists:
@@ -699,10 +706,15 @@ def start_websocket_client():
                                     conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
                                     if os.path.exists(conf_path):
                                         try:
-                                            import re
                                             with open(conf_path, "r") as f:
                                                 content = f.read()
-                                            ssids = re.findall(r'ssid=["\']([^"\']+)["\']', content)
+                                            ssids = []
+                                            for line in content.splitlines():
+                                                line = line.strip()
+                                                if "=" in line:
+                                                    parts = line.split("=", 1)
+                                                    if parts[0].strip() == "ssid":
+                                                        ssids.append(parts[1].strip().strip("\"'"))
                                             for s in ssids:
                                                 if s not in known_ssids:
                                                     known_ssids.append(s)
