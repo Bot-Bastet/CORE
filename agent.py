@@ -687,6 +687,11 @@ def start_websocket_client():
                                         ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
                                         
+                                elif msg_type == "manual_joint_control":
+                                    if ros2_process and ros2_process.stdin:
+                                        ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        ros2_process.stdin.flush()
+                                        
                                 elif msg_type == "scan_wifi":
                                     print("[Agent] Commande de scan WiFi reçue !")
                                     networks = get_wifi_list()

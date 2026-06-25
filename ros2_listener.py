@@ -32,6 +32,7 @@ class ROS2TelemetryListener(Node):
         
         # Publisher for calibration offsets
         self.calib_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_calibration', 10)
+        self.angles_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_angles', 10)
         
         # Timer to print state to stdout as JSON (2 Hz)
         self.create_timer(0.5, self.publish_telemetry)
@@ -127,6 +128,12 @@ class ROS2TelemetryListener(Node):
                         cal_msg = Float32MultiArray()
                         cal_msg.data = [float(x) for x in offsets]
                         self.calib_pub.publish(cal_msg)
+                elif msg_json.get("type") == "manual_joint_control":
+                    angles = msg_json.get("angles", [])
+                    if len(angles) == 12:
+                        ang_msg = Float32MultiArray()
+                        ang_msg.data = [float(x) for x in angles]
+                        self.angles_pub.publish(ang_msg)
                 elif msg_json.get("type") == "start_camera":
                     cam_id = msg_json.get("camera", 1)
                     v_slam = msg_json.get("v_slam", False)
