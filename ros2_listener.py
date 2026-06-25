@@ -102,10 +102,32 @@ class ROS2TelemetryListener(Node):
         except Exception:
             pass
             
+    def get_camera_devices(self):
+        import os, json
+        from pathlib import Path
+        default_mapping = {
+            1: "/dev/video0",
+            2: "/dev/video2"
+        }
+        mapping_file = Path("/opt/spotbot/config/camera_mapping.json")
+        if mapping_file.exists():
+            try:
+                data = json.loads(mapping_file.read_text())
+                left = data.get("left")
+                right = data.get("right")
+                if left:
+                    default_mapping[1] = left
+                if right:
+                    default_mapping[2] = right
+            except Exception:
+                pass
+        return default_mapping
+
     def publish_telemetry(self):
         import os
-        has_cam1 = os.path.exists("/dev/video0") or os.path.exists("/dev/video1")
-        has_cam2 = os.path.exists("/dev/video2") or os.path.exists("/dev/video3") or os.path.exists("/dev/video4")
+        mapping = self.get_camera_devices()
+        has_cam1 = os.path.exists(mapping[1])
+        has_cam2 = os.path.exists(mapping[2])
         data = {
             "type": "telemetry_diagnostics",
             "joints": self.joints,

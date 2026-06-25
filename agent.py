@@ -108,12 +108,33 @@ def trigger_updater():
     except Exception as e:
         print(f"[Agent] Erreur lancement updater : {e}")
 
+CAMERA_MAPPING_FILE = Path("/opt/spotbot/config/camera_mapping.json")
+
+def get_camera_devices() -> dict:
+    default_mapping = {
+        1: "/dev/video0",
+        2: "/dev/video2"
+    }
+    if CAMERA_MAPPING_FILE.exists():
+        try:
+            data = json.loads(CAMERA_MAPPING_FILE.read_text())
+            left = data.get("left")
+            right = data.get("right")
+            if left:
+                default_mapping[1] = left
+            if right:
+                default_mapping[2] = right
+        except Exception:
+            pass
+    return default_mapping
+
 def check_camera_connected(cam_id: int) -> bool:
     """Vérifie si la caméra physique est connectée au système."""
-    if cam_id == 1:
-        return os.path.exists("/dev/video0") or os.path.exists("/dev/video1")
-    else:
-        return os.path.exists("/dev/video2") or os.path.exists("/dev/video3") or os.path.exists("/dev/video4")
+    mapping = get_camera_devices()
+    dev = mapping.get(cam_id)
+    if dev:
+        return os.path.exists(dev)
+    return False
 
 def is_arduino_connected() -> bool:
     """Vérifie si le microcontrôleur Arduino Mega est physiquement connecté."""
@@ -158,23 +179,19 @@ def start_camera_stream(cam_id: int):
                 pass
             camera_processes[cam_id] = None
 
-    if cam_id == 1:
-        if is_device_free("/dev/video0"):
-            device = "/dev/video0"
-        elif is_device_free("/dev/video1"):
-            device = "/dev/video1"
-        else:
-            print(f"[Agent] Cam {cam_id}: /dev/video0 et /dev/video1 indisponibles (verrouillés par ROS).")
-            return
-    else:
-        device = None
-        for d in ["/dev/video2", "/dev/video3", "/dev/video4"]:
-            if is_device_free(d):
-                device = d
-                break
-        if device is None:
-            print(f"[Agent] Cam {cam_id}: Aucun device vidéo disponible.")
-            return
+    mapping = get_camera_devices()
+    device = mapping.get(cam_id)
+    if not device:
+        print(f"[Agent] Aucun device mappé pour Cam {cam_id}.")
+        return
+
+    if not os.path.exists(device):
+        print(f"[Agent] Cam {cam_id}: {device} inexistant.")
+        return
+
+    if not is_device_free(device):
+        print(f"[Agent] Cam {cam_id}: {device} indisponible (verrouillé par ROS).")
+        return
 
     rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
 
@@ -550,6 +567,7 @@ def update_status_loop():
             metrics = get_system_metrics()
             cpu_percent = min(int(metrics.get("cpu_load_1m", 0.0) * 25), 100)
 
+            mapping = get_camera_devices()
             payload = {
                 "seen_person": None,
                 "seen_objects": [],
@@ -557,6 +575,10 @@ def update_status_loop():
                 "robot_status": status,
                 "robot_version": get_version(),
                 "arduino_version": get_arduino_version(),
+                "camera_mapping": {
+                    "left": mapping[1],
+                    "right": mapping[2]
+                },
                 "sensors": {
                     "cpu_percent": cpu_percent,
                     "ram_percent": metrics.get("ram_percent", 0.0),
@@ -732,6 +754,20 @@ def start_websocket_client():
                                     print(f"[Agent] Connexion WiFi vers {ssid}...")
                                     res = connect_to_wifi(ssid, password)
                                     await ws.send(json.dumps({"type": "wifi_connect_result", **res}))
+
+                                elif msg_type == "save_camera_mapping":
+                                    left = data.get("left")
+                                    right = data.get("right")
+                                    print(f"[Agent] Sauvegarde du mapping caméra: left={left}, right={right}")
+                                    try:
+                                        CAMERA_MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
+                                        with open(str(CAMERA_MAPPING_FILE), "w") as f_map:
+                                            json.dump({"left": left, "right": right}, f_map)
+                                        subprocess.run(["sudo", "systemctl", "restart", "spotbot.service"])
+                                        await ws.send(json.dumps({"type": "camera_mapping_saved", "status": "ok"}))
+                                    except Exception as e_map:
+                                        print(f"[Agent] Erreur sauvegarde mapping camera : {e_map}")
+                                        await ws.send(json.dumps({"type": "camera_mapping_saved", "status": "error", "message": str(e_map)}))
                                     
                                 elif msg_type == "feature_request":
                                     feature = data.get("feature")

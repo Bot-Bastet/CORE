@@ -20,40 +20,55 @@ source /opt/spotbot/ros2_ws/install/setup.bash
 echo "[SpotBot] $(date) — Starting..." | tee $LOG/startup.log
 
 # 1. Cameras
-# Camera 1 (Left /dev/video0)
-fuser -k /dev/video0 2>/dev/null || true
-sleep 1
-ros2 run usb_cam usb_cam_node_exe --ros-args \
-  -r __node:=usb_cam1 \
-  -p video_device:=/dev/video0 -p pixel_format:=yuyv2rgb \
-  -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
-  -p camera_info_url:=file:///opt/spotbot/config/camera_calibration.yaml \
-  -p camera_name:=usb_cam1 -p frame_id:=camera_link \
-  -r image_raw:=/camera/left/image_raw -r camera_info:=/camera/left/camera_info \
-  >> $LOG/camera1.log 2>&1 &
+# Read mapping from /opt/spotbot/config/camera_mapping.json
+CAM_LEFT="/dev/video0"
+CAM_RIGHT="/dev/video2"
 
-# Camera 2 (Right /dev/video2) - only if detected
-if [ -e /dev/video2 ] || [ -e /dev/video3 ] || [ -e /dev/video4 ]; then
-    # Determine the actual right camera device file (usually /dev/video2)
-    if [ -e /dev/video2 ]; then
-        CAM2_DEV=/dev/video2
-    elif [ -e /dev/video3 ]; then
-        CAM2_DEV=/dev/video3
-    else
-        CAM2_DEV=/dev/video4
+MAPPING_FILE="/opt/spotbot/config/camera_mapping.json"
+if [ -f "$MAPPING_FILE" ]; then
+    LEFT_PARSE=$(grep -o '"left"[[:space:]]*:[[:space:]]*"[^"]*"' "$MAPPING_FILE" | cut -d'"' -f4)
+    RIGHT_PARSE=$(grep -o '"right"[[:space:]]*:[[:space:]]*"[^"]*"' "$MAPPING_FILE" | cut -d'"' -f4)
+    if [ -n "$LEFT_PARSE" ]; then
+        CAM_LEFT="$LEFT_PARSE"
     fi
-    fuser -k $CAM2_DEV 2>/dev/null || true
+    if [ -n "$RIGHT_PARSE" ]; then
+        CAM_RIGHT="$RIGHT_PARSE"
+    fi
+fi
+
+echo "[SpotBot] Mapped cameras: Left=$CAM_LEFT, Right=$CAM_RIGHT" | tee -a $LOG/startup.log
+
+# Camera 1 (Left)
+if [ -e "$CAM_LEFT" ]; then
+    fuser -k "$CAM_LEFT" 2>/dev/null || true
+    sleep 1
+    ros2 run usb_cam usb_cam_node_exe --ros-args \
+      -r __node:=usb_cam1 \
+      -p video_device:="$CAM_LEFT" -p pixel_format:=yuyv2rgb \
+      -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
+      -p camera_info_url:=file:///opt/spotbot/config/camera_calibration.yaml \
+      -p camera_name:=usb_cam1 -p frame_id:=camera_link \
+      -r image_raw:=/camera/left/image_raw -r camera_info:=/camera/left/camera_info \
+      >> $LOG/camera1.log 2>&1 &
+    echo "[SpotBot] Camera Left OK ($CAM_LEFT)" | tee -a $LOG/startup.log
+else
+    echo "[SpotBot] Camera Left NOT detected ($CAM_LEFT)" | tee -a $LOG/startup.log
+fi
+
+# Camera 2 (Right)
+if [ -e "$CAM_RIGHT" ]; then
+    fuser -k "$CAM_RIGHT" 2>/dev/null || true
     sleep 1
     ros2 run usb_cam usb_cam_node_exe --ros-args \
       -r __node:=usb_cam2 \
-      -p video_device:=$CAM2_DEV -p pixel_format:=yuyv2rgb \
+      -p video_device:="$CAM_RIGHT" -p pixel_format:=yuyv2rgb \
       -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
       -p camera_name:=usb_cam2 -p frame_id:=camera2_link \
       -r image_raw:=/camera/right/image_raw -r camera_info:=/camera/right/camera_info \
       >> $LOG/camera2.log 2>&1 &
-    echo "[SpotBot] Camera 2 OK ($CAM2_DEV)" | tee -a $LOG/startup.log
+    echo "[SpotBot] Camera Right OK ($CAM_RIGHT)" | tee -a $LOG/startup.log
 else
-    echo "[SpotBot] Camera 2 not detected" | tee -a $LOG/startup.log
+    echo "[SpotBot] Camera Right NOT detected ($CAM_RIGHT)" | tee -a $LOG/startup.log
 fi
 
 # 2. TF
