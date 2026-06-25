@@ -382,7 +382,7 @@ def flash_arduino_task():
 
         # ── 3. Librairies requises ─────────────────────────────────────────
         report_arduino_progress("installing_libs", 20)
-        _ensure_arduino_lib("SparkFun BNO08x Arduino Library")
+        _ensure_arduino_lib("SparkFun BNO08x Cortex Based IMU")
         _ensure_arduino_lib("Servo")
 
         # ── 4. Détection port Arduino ──────────────────────────────────────
