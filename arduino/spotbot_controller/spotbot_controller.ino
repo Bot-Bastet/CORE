@@ -78,6 +78,7 @@ bool   bno_ok   = false;
 unsigned long last_cmd_ms  = 0;
 unsigned long last_imu_ms  = 0;
 bool          watchdog_mode = false;
+bool          servos_enabled = false;  // servos désactivés jusqu'à la 1ère commande
 
 BNO08x bno;
 
@@ -100,11 +101,11 @@ void setup() {
     Serial.begin(SERIAL_BAUD);
     delay(100);
 
-    // Servos
+    // Servos — attachés SANS émettre de signal (détachés après)
+    // Les servos ne bougent PAS au démarrage ; ils attendent la 1ère commande
     for (int i = 0; i < NUM_SERVOS; i++) {
-        servos[i].attach(SERVO_PINS[i]);
         servo_targets[i] = SERVO_STAND[i];
-        servos[i].write((int)SERVO_STAND[i]);
+        // On n'attache pas et n'écrit pas : les servos restent libres
     }
 
     // I2C — 400 kHz Fast Mode
@@ -145,8 +146,11 @@ void loop() {
 
     if (!watchdog_mode && (millis() - last_cmd_ms) > WATCHDOG_MS) {
         watchdog_mode = true;
-        setStand();
-        Serial.println("{\"watchdog\":\"stand\"}");
+        // Servos déjà libres si jamais activés, sinon on remet en stand
+        if (servos_enabled) {
+            setStand();
+            Serial.println("{\"watchdog\":\"stand\"}");
+        }
     }
 
     applyServos();
@@ -230,13 +234,18 @@ void parseServos(const char* json) {
         angles[n++] = atof(p);
         while (*p && *p != ',' && *p != ']') p++;
     }
-    for (int i = 0; i < n && i < NUM_SERVOS; i++)
+    // Activer et attacher les servos dès la 1ère commande d'angles reçue
+    servos_enabled = true;
+    for (int i = 0; i < n && i < NUM_SERVOS; i++) {
+        if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
         servo_targets[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+    }
 }
 
 void parseCmd(const char* json) {
-    if (strstr(json, "\"stand\""))         setStand();
-    else if (strstr(json, "\"sit\""))      setSit();
+    if (strstr(json, "\"stand\""))          setStand();
+    else if (strstr(json, "\"sit\""))       setSit();
+    else if (strstr(json, "\"stop\""))      stopServos();
     else if (strstr(json, "\"reset_imu\"")) resetBNO085();
 }
 
@@ -251,9 +260,35 @@ void resetBNO085() {
     Serial.println("{\"info\":\"BNO085 reset\"}");
 }
 
-void setStand() { for (int i=0;i<NUM_SERVOS;i++) servo_targets[i]=SERVO_STAND[i]; }
-void setSit()   { for (int i=0;i<NUM_SERVOS;i++) servo_targets[i]=SERVO_SIT[i];   }
-void applyServos() { for (int i=0;i<NUM_SERVOS;i++) servos[i].write((int)servo_targets[i]); }
+void setStand() {
+    servos_enabled = true;
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
+        servo_targets[i] = SERVO_STAND[i];
+    }
+    Serial.println("{\"info\":\"stand\"}");
+}
+void setSit() {
+    servos_enabled = true;
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
+        servo_targets[i] = SERVO_SIT[i];
+    }
+    Serial.println("{\"info\":\"sit\"}");
+}
+void stopServos() {
+    servos_enabled = false;
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        servos[i].detach();
+    }
+    Serial.println("{\"info\":\"servos_stopped\"}");
+}
+void applyServos() {
+    if (!servos_enabled) return;
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        if (servos[i].attached()) servos[i].write((int)servo_targets[i]);
+    }
+}
 
 // ============================================================
 // HC-SR04
