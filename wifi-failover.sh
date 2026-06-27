@@ -124,8 +124,8 @@ while true; do
     fi
     
     # 3. Mode normal : si la connexion actuelle est perdue, rétablir vers le SSID par défaut
-    if [ -n "$ACTIVE_IFACE" ] && is_connected "$ACTIVE_IFACE"; then
-        # Tout va bien
+    if [ -n "$CUR_SSID" ]; then
+        # Tout va bien, on est connecté à un réseau WiFi
         sleep $CHECK_INTERVAL
         continue
     fi

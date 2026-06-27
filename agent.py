@@ -944,6 +944,11 @@ def start_websocket_client():
                                     print(f"[Agent] Connexion WiFi vers {ssid}...")
                                     res = connect_to_wifi(ssid, password)
                                     await ws.send(json.dumps({"type": "wifi_connect_result", **res}))
+                                elif msg_type == "forget_wifi":
+                                    ssid = data.get("ssid")
+                                    print(f"[Agent] Commande d'oubli WiFi pour {ssid}...")
+                                    res = forget_wifi_network(ssid)
+                                    await ws.send(json.dumps({"type": "wifi_forget_result", "ssid": ssid, **res}))
 
                                 elif msg_type == "save_camera_mapping":
                                     left = data.get("left")
