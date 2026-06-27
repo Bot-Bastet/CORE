@@ -178,22 +178,28 @@ void readBNO085() {
     if (!bno.getSensorEvent()) return;
 
     switch (bno.getSensorEventID()) {
-        case SENSOR_REPORTID_ROTATION_VECTOR:
-            bno_data.qw    = bno.getQuatReal();
-            bno_data.qx    = bno.getQuatI();
-            bno_data.qy    = bno.getQuatJ();
-            bno_data.qz    = bno.getQuatK();
+        case SENSOR_REPORTID_ROTATION_VECTOR: {
+            float sqw = bno.getQuatReal();
+            float sqx = bno.getQuatI();
+            float sqy = bno.getQuatJ();
+            float sqz = bno.getQuatK();
+            // Appliquer une rotation de 180° autour de X (IMU montée à l'envers sous le robot)
+            bno_data.qw    = sqx;
+            bno_data.qx    = -sqw;
+            bno_data.qy    = -sqz;
+            bno_data.qz    = sqy;
             bno_data.calib = bno.getQuatAccuracy();
             break;
+        }
         case SENSOR_REPORTID_LINEAR_ACCELERATION:
             bno_data.lax = bno.getLinAccelX();
-            bno_data.lay = bno.getLinAccelY();
-            bno_data.laz = bno.getLinAccelZ();
+            bno_data.lay = -bno.getLinAccelY();
+            bno_data.laz = -bno.getLinAccelZ();
             break;
         case SENSOR_REPORTID_GYROSCOPE_CALIBRATED:
             bno_data.gx = bno.getGyroX();
-            bno_data.gy = bno.getGyroY();
-            bno_data.gz = bno.getGyroZ();
+            bno_data.gy = -bno.getGyroY();
+            bno_data.gz = -bno.getGyroZ();
             break;
     }
 }

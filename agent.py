@@ -645,6 +645,7 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
                 # Select the network to force association
                 subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "select_network", net_id], check=True)
             else:
+                subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "enable_network", "all"], capture_output=True)
                 return {"status": "error", "message": f"Réseau enregistré '{ssid}' introuvable dans wpa_cli."}
         else:
             # Strip existing blocks for this SSID and write the new one
@@ -693,7 +694,47 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
                 return {"status": "success", "message": f"Connecté à {ssid} avec succès."}
             time.sleep(1)
             
+        # Re-enable all networks if connection timed out
+        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "enable_network", "all"], capture_output=True)
         return {"status": "error", "message": f"Délai d'obtention IP dépassé pour {ssid}."}
+    except Exception as e:
+        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "enable_network", "all"], capture_output=True)
+        return {"status": "error", "message": str(e)}
+
+def forget_wifi_network(ssid: str) -> dict:
+    try:
+        conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
+        content = ""
+        if os.path.exists(conf_path):
+            with open(conf_path, "r") as f:
+                content = f.read()
+                
+        blocks = content.split("network={")
+        new_blocks = [blocks[0]]
+        removed = False
+        for block in blocks[1:]:
+            brace_idx = block.find("}")
+            if brace_idx != -1:
+                block_content = block[:brace_idx]
+                rest = block[brace_idx:]
+                if f'ssid="{ssid}"' in block_content or f"ssid='{ssid}'" in block_content:
+                    new_blocks[0] += rest.lstrip("}").lstrip("\n")
+                    removed = True
+                    continue
+            new_blocks.append("network={" + block)
+            
+        if not removed:
+            return {"status": "error", "message": f"Réseau '{ssid}' non trouvé."}
+            
+        new_content = "".join(new_blocks).strip() + "\n"
+        with open(conf_path, "w") as f:
+            f.write(new_content)
+            
+        # Reconfigure wpa_supplicant
+        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
+        subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "enable_network", "all"], capture_output=True)
+        
+        return {"status": "success", "message": f"Réseau '{ssid}' oublié avec succès."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
