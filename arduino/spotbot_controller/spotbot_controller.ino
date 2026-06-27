@@ -38,6 +38,7 @@
 // ============================================================
 // Configuration
 // ============================================================
+#define SKETCH_VERSION    "v0.2.7"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       115200
 #define IMU_PUBLISH_MS    20      // 50 Hz
@@ -93,6 +94,8 @@ struct BnoData {
 float sonar_history[SONAR_SAMPLES] = {0};
 int   sonar_idx   = 0;
 bool  sonar_valid = false;
+unsigned long last_sonar_ms = 0;
+float cached_sonar_dist = -1.0f;
 
 // ============================================================
 // Setup
@@ -157,10 +160,14 @@ void loop() {
 
     if (bno_ok) readBNO085();
 
+    if (millis() - last_sonar_ms >= 100) {
+        last_sonar_ms = millis();
+        cached_sonar_dist = readSonar();
+    }
+
     if ((millis() - last_imu_ms) >= IMU_PUBLISH_MS) {
         last_imu_ms = millis();
-        float dist = readSonar();
-        publishAll(dist);
+        publishAll(cached_sonar_dist);
     }
 }
 
@@ -303,7 +310,7 @@ float readSonar() {
     digitalWrite(SONAR_TRIG_PIN, LOW);  delayMicroseconds(2);
     digitalWrite(SONAR_TRIG_PIN, HIGH); delayMicroseconds(10);
     digitalWrite(SONAR_TRIG_PIN, LOW);
-    long dur = pulseIn(SONAR_ECHO_PIN, HIGH, 25000UL);
+    long dur = pulseIn(SONAR_ECHO_PIN, HIGH, 11600UL);
     if (dur == 0) { sonar_valid = false; return -1.0f; }
     float d = dur / 58.0f;
     if (d < SONAR_MIN_CM || d > SONAR_MAX_CM) { sonar_valid = false; return -1.0f; }
@@ -337,5 +344,7 @@ void publishAll(float dist_cm) {
     Serial.print("\"dist_cm\":"); Serial.print(dist_cm, 1);
     Serial.print(",\"valid\":"); Serial.print(sonar_valid ? "true" : "false");
     Serial.print(",\"alert\":"); Serial.print(alert ? "true" : "false");
-    Serial.println("}}");
+    Serial.print("},\"version\":\"");
+    Serial.print(SKETCH_VERSION);
+    Serial.println("\"}");
 }

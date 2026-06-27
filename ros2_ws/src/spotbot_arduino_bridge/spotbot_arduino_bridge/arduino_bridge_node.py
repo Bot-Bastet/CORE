@@ -20,6 +20,7 @@ import json
 import time
 import glob
 import struct
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
@@ -223,8 +224,11 @@ class ArduinoBridgeNode(Node):
         if 'status' in data and data.get('bno085') is False:
             self.get_logger().error('BNO085 non detecte sur l\'Arduino! Verifiez I2C (0x4A) et les cables.')
 
-        if 'sonar' in data:
+        if 'sonar' in data and isinstance(data['sonar'], dict):
             self._publish_sonar(data['sonar'])
+
+        if 'version' in data:
+            self._save_arduino_version(data['version'])
 
     def _publish_imu_bno085(self, imu_raw: dict):
         """BNO085 : quaternion fused + accéleration linéaire + gyro -> /imu/data et /imu/data_raw."""
@@ -319,6 +323,16 @@ class ArduinoBridgeNode(Node):
         msg = String()
         msg.data = status
         self._status_pub.publish(msg)
+
+    def _save_arduino_version(self, version: str):
+        try:
+            version_file = Path("/opt/spotbot/arduino_version.txt")
+            if not version_file.exists() or version_file.read_text().strip() != version:
+                version_file.parent.mkdir(parents=True, exist_ok=True)
+                version_file.write_text(version)
+                self.get_logger().info(f"Version de l'Arduino detectee et mise a jour : {version}")
+        except Exception:
+            pass
 
 
 def main(args=None):

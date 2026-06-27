@@ -11,6 +11,8 @@ from sensor_msgs.msg import JointState, Imu, Image
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32MultiArray, String
 
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+
 class ROS2TelemetryListener(Node):
     def __init__(self):
         super().__init__('ros2_telemetry_listener')
@@ -26,8 +28,9 @@ class ROS2TelemetryListener(Node):
         self.cam_threads = {1: None, 2: None}
         
         # Subscriptions
+        qos_best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
-        self.create_subscription(Imu, '/imu/data', self.imu_callback, 10)
+        self.create_subscription(Imu, '/imu/data', self.imu_callback, qos_best_effort)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         
         # Publisher for calibration offsets
