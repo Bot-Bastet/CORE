@@ -632,13 +632,16 @@ def get_wifi_list() -> list:
 
 def connect_to_wifi(ssid: str, password: str) -> dict:
     try:
-        conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
+        if password and len(password) < 8:
+            return {"status": "error", "message": "Le mot de passe WPA/WPA2 doit faire au moins 8 caractères."}
+            
+        conf_path = "/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
         content = ""
         if os.path.exists(conf_path):
             with open(conf_path, "r") as f:
                 content = f.read()
                 
-        # Check if SSID exists in wpa_supplicant.conf
+        # Check if SSID exists in config
         ssid_exists = False
         ssids = []
         for line in content.splitlines():
@@ -689,8 +692,15 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
                 new_network = f'network={{\n\tssid="{ssid}"\n\tkey_mgmt=NONE\n}}\n'
                 
             new_content += new_network
-            with open(conf_path, "w") as f:
-                f.write(new_content)
+            
+            # Write to both configs
+            for p in ["/etc/wpa_supplicant/wpa_supplicant-wlan0.conf", "/etc/wpa_supplicant/wpa_supplicant.conf"]:
+                try:
+                    with open(p, "w") as f:
+                        f.write(new_content)
+                    os.chmod(p, 0o600)
+                except Exception as e_write:
+                    print(f"[Agent] Erreur ecriture {p}: {e_write}")
                 
             # Reconfigure wpa_supplicant
             subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
@@ -724,7 +734,7 @@ def connect_to_wifi(ssid: str, password: str) -> dict:
 
 def forget_wifi_network(ssid: str) -> dict:
     try:
-        conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
+        conf_path = "/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
         content = ""
         if os.path.exists(conf_path):
             with open(conf_path, "r") as f:
@@ -748,8 +758,15 @@ def forget_wifi_network(ssid: str) -> dict:
             return {"status": "error", "message": f"Réseau '{ssid}' non trouvé."}
             
         new_content = "".join(new_blocks).strip() + "\n"
-        with open(conf_path, "w") as f:
-            f.write(new_content)
+        
+        # Write to both configs
+        for p in ["/etc/wpa_supplicant/wpa_supplicant-wlan0.conf", "/etc/wpa_supplicant/wpa_supplicant.conf"]:
+            try:
+                with open(p, "w") as f:
+                    f.write(new_content)
+                os.chmod(p, 0o600)
+            except Exception as e_write:
+                print(f"[Agent] Erreur ecriture {p}: {e_write}")
             
         # Reconfigure wpa_supplicant
         subprocess.run(["sudo", "wpa_cli", "-i", "wlan0", "reconfigure"], check=True)
