@@ -422,11 +422,14 @@ def flash_arduino_task():
         build_path.mkdir(parents=True, exist_ok=True)
 
         if sketch_src.exists():
-            import shutil
-            if sketch_dest.exists():
-                shutil.rmtree(sketch_dest)
-            shutil.copytree(sketch_src, sketch_dest)
-            print(f"[Agent] Sketch copié vers {sketch_dest}")
+            if sketch_src.resolve() != sketch_dest.resolve():
+                import shutil
+                if sketch_dest.exists():
+                    shutil.rmtree(sketch_dest)
+                shutil.copytree(sketch_src, sketch_dest)
+                print(f"[Agent] Sketch copié vers {sketch_dest}")
+            else:
+                print(f"[Agent] Le sketch est déjà à sa destination : {sketch_dest}")
         elif not sketch_dest.exists():
             print(f"[Agent] ✗ Sketch introuvable : {sketch_src} ni {sketch_dest}")
             report_arduino_progress("failed_no_sketch", 0)
