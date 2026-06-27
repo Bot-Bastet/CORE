@@ -16,7 +16,18 @@ get_wifi_interfaces() {
 }
 
 current_ssid() {
-    iwgetid -r 2>/dev/null
+    local iface=$1
+    if [ -z "$iface" ]; then
+        iface="wlan0"
+    fi
+    local ssid=""
+    if command -v iwgetid >/dev/null 2>&1; then
+        ssid=$(iwgetid -r $iface 2>/dev/null)
+    fi
+    if [ -z "$ssid" ]; then
+        ssid=$(wpa_cli -i $iface status 2>/dev/null | grep '^ssid=' | cut -d= -f2)
+    fi
+    echo "$ssid"
 }
 
 current_active_interface() {
@@ -26,10 +37,45 @@ current_active_interface() {
 is_connected() {
     local iface=$1
     if [ -z "$iface" ]; then
-        ping -c 1 -W $PING_TIMEOUT $PING_TARGET > /dev/null 2>&1
-    else
-        ping -I $iface -c 1 -W $PING_TIMEOUT $PING_TARGET > /dev/null 2>&1
+        iface="wlan0"
     fi
+    # Check if interface has an IP address
+    if ip addr show dev $iface 2>/dev/null | grep -q 'inet '; then
+        # Try pinging the local gateway for that interface first
+        local gw=$(ip route show dev $iface | grep default | awk '{print $3}' | head -1)
+        if [ -n "$gw" ]; then
+            if ping -c 1 -W 2 $gw >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        # Fallback to pinging 8.8.8.8 if gateway ping fails
+        if ping -c 1 -W $PING_TIMEOUT $PING_TARGET >/dev/null 2>&1; then
+            return 0
+        fi
+        # If both fail but we have an IP, we are still considered connected locally
+        return 0
+    fi
+    return 1
+}
+
+is_system_connected() {
+    # Check if we have a default route on any interface
+    if ip route show | grep -q 'default '; then
+        # Try pinging the default gateway
+        local gw=$(ip route show | grep default | awk '{print $3}' | head -1)
+        if [ -n "$gw" ]; then
+            if ping -c 1 -W 2 $gw >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        # Fallback to pinging 8.8.8.8
+        if ping -c 1 -W $PING_TIMEOUT $PING_TARGET >/dev/null 2>&1; then
+            return 0
+        fi
+        # If we have a default route but ping fails, we are still likely connected locally
+        return 0
+    fi
+    return 1
 }
 
 connect_wifi() {
@@ -76,6 +122,11 @@ with open(conf_path, 'w') as f:
 echo "$(date) [failover] WiFi failover service started" >> $LOG
 
 while true; do
+    if is_system_connected; then
+        sleep $CHECK_INTERVAL
+        continue
+    fi
+
     INTERFACES=$(get_wifi_interfaces)
     if [ -z "$INTERFACES" ]; then
         sleep $CHECK_INTERVAL
