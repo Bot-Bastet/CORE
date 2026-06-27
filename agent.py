@@ -936,27 +936,41 @@ def start_websocket_client():
                                     print("[Agent] Commande de scan WiFi reçue !")
                                     networks = get_wifi_list()
                                     known_ssids = []
+                                    known_passwords = {}
                                     conf_path = "/etc/wpa_supplicant/wpa_supplicant.conf"
                                     if os.path.exists(conf_path):
                                         try:
                                             with open(conf_path, "r") as f:
                                                 content = f.read()
-                                            ssids = []
-                                            for line in content.splitlines():
-                                                line = line.strip()
-                                                if "=" in line:
-                                                    parts = line.split("=", 1)
-                                                    if parts[0].strip() == "ssid":
-                                                        ssids.append(parts[1].strip().strip("\"'"))
-                                            for s in ssids:
-                                                if s not in known_ssids:
-                                                    known_ssids.append(s)
+                                            # Parse all network blocks to extract ssid + psk
+                                            import re as _re
+                                            for block in _re.findall(r'network\s*=\s*\{([^}]*)\}', content, _re.DOTALL):
+                                                ssid_m = _re.search(r'ssid\s*=\s*"([^"]+)"', block)
+                                                psk_m  = _re.search(r'psk\s*=\s*"([^"]+)"', block)
+                                                if ssid_m:
+                                                    s = ssid_m.group(1)
+                                                    if s not in known_ssids:
+                                                        known_ssids.append(s)
+                                                    if psk_m:
+                                                        known_passwords[s] = psk_m.group(1)
                                         except Exception as e_wpa:
                                             print(f"[Agent] Erreur lecture wpa_supplicant.conf : {e_wpa}")
+                                    # Get current connected SSID
+                                    current_ssid = ""
+                                    try:
+                                        res_cur = subprocess.run(
+                                            ["sudo", "iwgetid", "wlan0", "--raw"],
+                                            capture_output=True, text=True, timeout=5
+                                        )
+                                        current_ssid = res_cur.stdout.strip()
+                                    except Exception:
+                                        pass
                                     await ws.send(json.dumps({
                                         "type": "wifi_list",
                                         "networks": networks,
-                                        "known_ssids": known_ssids
+                                        "known_ssids": known_ssids,
+                                        "known_passwords": known_passwords,
+                                        "current_ssid": current_ssid
                                     }))
                                     
                                 elif msg_type == "connect_wifi":
