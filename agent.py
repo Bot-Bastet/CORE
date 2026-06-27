@@ -437,6 +437,24 @@ def flash_arduino_task():
         else:
             print(f"[Agent] Utilisation du sketch existant sur {sketch_dest}")
 
+        # Injection dynamique de la version du robot dans le sketch Arduino
+        try:
+            ino_file = sketch_dest / "spotbot_controller.ino"
+            if ino_file.exists():
+                version_str = get_version()
+                content = ino_file.read_text(encoding='utf-8', errors='ignore')
+                import re
+                new_content = re.sub(
+                    r'#define\s+SKETCH_VERSION\s+"[^"]*"',
+                    f'#define SKETCH_VERSION    "{version_str}"',
+                    content
+                )
+                if new_content != content:
+                    ino_file.write_text(new_content, encoding='utf-8')
+                    print(f"[Agent] Version {version_str} injectée dans {ino_file.name}")
+        except Exception as e:
+            print(f"[Agent] Erreur injection version sketch: {e}")
+
         # ── 6. Compilation ─────────────────────────────────────────────────
         report_arduino_progress("compiling", 45)
         print(f"[Agent] Compilation de {sketch_dest}...")
