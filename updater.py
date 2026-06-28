@@ -205,16 +205,23 @@ def check_and_apply_update() -> bool:
             report_progress("failed", 0)
             raise Exception(f"colcon build failed with code {process.returncode}")
 
-        # 1. Corriger et redémarrer bastet-tunnel.service pour utiliser le nouveau nom de domaine de la gateway
+        # 1. Corriger et redémarrer bastet-tunnel.service pour utiliser la nouvelle IP publique
         tunnel_path = Path("/etc/systemd/system/bastet-tunnel.service")
         if tunnel_path.exists():
             logger.info("[AutoUpdater] Correction de bastet-tunnel.service...")
             try:
                 content = tunnel_path.read_text()
+                modified = False
                 if "79.94.238.213" in content:
                     logger.info("[AutoUpdater] Remplacement de l'ancienne IP dans bastet-tunnel.service...")
-                    new_content = content.replace("79.94.238.213", "ha.arthonetwork.fr")
-                    tunnel_path.write_text(new_content)
+                    content = content.replace("79.94.238.213", "82.67.220.37")
+                    modified = True
+                if "ha.arthonetwork.fr" in content:
+                    logger.info("[AutoUpdater] Remplacement du domaine dans bastet-tunnel.service...")
+                    content = content.replace("ha.arthonetwork.fr", "82.67.220.37")
+                    modified = True
+                if modified:
+                    tunnel_path.write_text(content)
                     subprocess.run(["systemctl", "daemon-reload"], check=True)
                     subprocess.run(["systemctl", "restart", "bastet-tunnel.service"], check=True)
                     logger.info("[AutoUpdater] bastet-tunnel.service corrigé et redémarré.")
@@ -224,6 +231,7 @@ def check_and_apply_update() -> bool:
         # 2. Mettre à jour version.txt
         VERSION_FILE.write_text(latest_tag)
         logger.info(f"[AutoUpdater] Mise à jour {latest_tag} appliquée avec succès.")
+        report_progress("idle", 100)
 
         # 3. Installer/mettre à jour le service agent et le redémarrer en dernier (ce qui tuera ce script)
         agent_svc = CORE_SRC / "spotbot-agent.service"
