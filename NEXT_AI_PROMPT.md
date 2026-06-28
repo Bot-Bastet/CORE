@@ -1,59 +1,56 @@
-# 🐕 CONTEXTE & INSTRUCTIONS POUR LA PROCHAINE IA
+# 🐕 CONTEXTE DE L'ARCHITECTURE DOUBLE RASPBERRY PI & INSTRUCTIONS
 
-Ce document sert de prompt d'initialisation et de guide de travail pour résoudre les problèmes restants sur le robot Bastet (SpotBot).
-
----
-
-## 1. 🏗️ ARCHITECTURE & CONFIGURATION DU PROJET
-
-Le projet est composé de trois sous-systèmes principaux :
-1. **La Gateway (CORE-Gateway)** :
-   * Serveur FastAPI (`main.py`) s'exécutant sur une machine distante (VM Docker sur l'hôte `ha.arthonetwork.fr` / `82.67.220.37`).
-   * Gère le dashboard utilisateur et coordonne les commandes du robot.
-2. **Le CPU du Robot (Pi 5)** :
-   * Exécute un agent en arrière-plan (`agent.py`) via le service systemd `spotbot-agent.service` (lancé en tant que `root`).
-   * L'agent communique avec la Gateway via WebSocket (`wss://ha.arthonetwork.fr:44888/ws/robot?token=...`).
-3. **Le Microcontrôleur (Arduino Mega 2560)** :
-   * Connecté en USB au Pi, il reçoit les commandes de cinématique des moteurs et renvoie la télémétrie capteurs (imu, tension...).
-
-### 🔑 Identifiants & Connexions
-* **IP Locale du Robot** : `192.168.1.156` (connecté actuellement en Ethernet).
-* **Utilisateur SSH** : `bastet`
-* **Mot de passe** : `bastet`
-* **Port SSH** : `22` (local)
-* **Tunnel SSH Inverse (autossh)** :
-  * Le service `bastet-tunnel.service` tourne sur le robot et se connecte à la Gateway `82.67.220.37` (nouvelle IP publique).
-  * Il mappe le port distant **`49022`** de la Gateway vers le port local `22` du Pi.
-  * Commande de connexion depuis le serveur Gateway : `ssh -p 49022 bastet@localhost`.
-* **Token d'authentification Gateway** :
-  ```text
-  bst_c9f28d3a1e4b85c7f0d4b9a2e6f1c3d5
-  ```
-  (Doit être fourni dans l'en-tête `X-API-Token` de toutes les requêtes REST de l'updater ou de l'agent).
+Ce document détaille l'architecture double Raspberry Pi du projet Bastet et sert de prompt pour la prochaine IA.
 
 ---
 
-## 2. 📶 ÉTAT ACTUEL DU SYSTÈME WIFI (A CORRIGER)
+## 1. 🏗️ ARCHITECTURE DOUBLE RASPBERRY PI
 
-Le système d'auto-connexion WiFi et de scan présente des instabilités majeures :
-1. **Échec d'auto-connexion** : Après que le robot a démarré ou tourné pendant un certain temps, il ne se connecte pas automatiquement au WiFi ciblé (`Freebox-5E6B8A`).
-2. **Chargement infini du Scan** : Dans l'interface Gateway, lorsqu'on clique sur "Rafraîchir" pour scanner les WiFi, le chargement tourne à l'infini.
+Le projet utilise **deux Raspberry Pis distincts** pour séparer les tâches embarquées physiques des tâches de serveur/passerelle :
 
-### Pistes d'investigation pour l'IA :
-* **Service WiFi actif** : Nous avons configuré `wpa_supplicant@wlan0.service` pour utiliser `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`.
-* **Conflits système** : Le Pi tourne sous Debian 13 (Trixie). Il est très probable que **NetworkManager** soit installé et actif, ce qui entre en conflit avec l'instance manuelle de `wpa_supplicant@wlan0.service` et bloque l'interface `wlan0`.
-* **Blocage du scan** : Dans `agent.py`, la fonction `get_wifi_list()` exécute `sudo iwlist wlan0 scan`. Si `wlan0` est verrouillé par NetworkManager ou un autre processus, ou si l'interface est désactivée, cette commande peut expirer, lever une exception ou bloquer le thread de réception WebSocket, causant le chargement infini sur l'interface Gateway.
+### 🟢 RASPBERRY PI 1 : LE ROBOT (Raspberry Pi 5)
+* **Rôle** : Contrôle physique du robot, cinématique, lecture des capteurs IMU/tension, envoi des flux vidéo, et communication série avec le microcontrôleur Arduino Mega 2560.
+* **OS / Logiciels** : Debian 13 (Trixie), ROS 2 Jazzy Jalisco compilé depuis les sources.
+* **Processus principal** : Un agent en arrière-plan (`agent.py`) s'exécutant via le service systemd `spotbot-agent.service` en tant que `root`.
+* **Identifiants & Accès** :
+  * **IP Locale** : `192.168.1.156` (Ethernet local).
+  * **Accès SSH** : `bastet` / `bastet` (Port 22).
+  * **WiFi (`wlan0`)** : Géré par le service `wpa_supplicant@wlan0.service` (ou via NetworkManager en cas de conflit). Actuellement configuré pour se connecter à la `Freebox-5E6B8A`.
+
+### 🔵 RASPBERRY PI 2 : LA GATEWAY (Raspberry Pi faisant office de Serveur)
+* **Rôle** : Héberge le serveur central de coordination, l'interface graphique (Dashboard), et le serveur de diffusion vidéo (MediaMTX).
+* **OS / Logiciels** : Linux, Docker, Docker Compose, Caddy (reverse proxy).
+* **Adresse Publique** : `ha.arthonetwork.fr` (IP publique : `82.67.220.37`).
+* **Accès SSH** : `tealo` (via la clé SSH privée `id_ed25519_openclaw` sur Windows).
+* **Services principaux (conteneurs Docker)** :
+  * **`bastet-face-server`** : Le backend FastAPI (`main.py`) qui écoute sur le port interne `44888` (mappé sur `127.0.0.1:44887` sur l'hôte, et exposé publiquement via Caddy sur `44888`).
+  * **`caddy-proxy`** : Gère les certificats SSL et redirige les requêtes.
+  * **`bastet-rtsp-proxy` (MediaMTX)** : Reçoit les flux vidéo RTSP envoyés par le Robot Pi et les distribue au Dashboard.
 
 ---
 
-## 3. 🎯 MISSION DE L'IA
+## 2. 🔌 PROTOCOLES DE COMMUNICATION & SÉCURITÉ
 
-Votre tâche est de résoudre définitivement ces problèmes de WiFi :
-1. **Établir un diagnostic propre de la configuration réseau sur le Pi 5** :
-   * Vérifier si NetworkManager est actif (`systemctl is-active NetworkManager`).
-   * Configurer le système pour utiliser soit uniquement NetworkManager (via des commandes `nmcli` dans l'agent), soit désactiver NetworkManager pour laisser le contrôle à `wpa_supplicant@wlan0`.
-2. **Corriger l'auto-connexion** :
-   * Veiller à ce que l'interface `wlan0` s'associe automatiquement au SSID configuré (ex. `Freebox-5E6B8A`) au boot et après déconnexion.
-3. **Résoudre le chargement infini du scan** :
-   * Sécuriser la fonction `get_wifi_list()` dans `agent.py` pour éviter les blocages.
-   * Si la commande de scan échoue ou expire, s'assurer qu'un message d'erreur ou une liste vide soit renvoyée proprement à la Gateway via WebSocket, afin d'interrompre l'animation de chargement sur le dashboard.
+1. **WebSocket Temps Réel** :
+   * Le Robot Pi 1 (`agent.py`) se connecte en sortant vers la Gateway du Pi 2 :
+     `wss://ha.arthonetwork.fr:44888/ws/robot?token=bst_c9f28d3a1e4b85c7f0d4b9a2e6f1c3d5`
+   * Ce canal sert à transmettre la télémétrie en temps réel et à recevoir les commandes instantanées (démarrage, flash Arduino, mouvements, WiFi).
+2. **Tunnel SSH Inverse (autossh)** :
+   * Le Robot Pi 1 lance `bastet-tunnel.service` qui se connecte au Pi 2 (`tealo@82.67.220.37`) via SSH.
+   * Il redirige le port distant **`49022`** du Pi 2 vers le port local `22` du Robot Pi 1.
+   * Cela permet de se connecter au Robot Pi 1 depuis le Pi 2 avec : `ssh -p 49022 bastet@localhost`.
+3. **Jetons de sécurité (X-API-Token)** :
+   * Le token d'API est : `bst_c9f28d3a1e4b85c7f0d4b9a2e6f1c3d5`
+   * Toutes les requêtes HTTP (ex. progrès d'update, requêtes de statut) doivent l'inclure.
+
+---
+
+## 3. 📶 LE PROBLÈME WIFI A RÉSOUDRE
+
+Le WiFi (`wlan0`) du Robot Pi 1 présente deux bugs majeurs :
+1. **Pas d'auto-connexion au démarrage** : Le robot est resté allumé pendant un moment mais ne s'est pas associé automatiquement au WiFi configuré (`Freebox-5E6B8A`), obligeant l'utilisateur à le brancher en Ethernet (`192.168.1.156`).
+2. **Scan WiFi infini** : Cliquer sur "Rafraîchir" dans l'interface Gateway pour scanner les WiFi environnants tourne en boucle sans s'arrêter.
+
+### Tâche pour l'IA :
+* Résoudre le conflit potentiel sur le Robot Pi 1 entre **NetworkManager** (installé par défaut sur Debian 13) et la gestion manuelle via `wpa_supplicant@wlan0.service`.
+* Sécuriser la fonction `get_wifi_list()` de `CORE/agent.py` (qui lance `sudo iwlist wlan0 scan`). Si l'interface `wlan0` est verrouillée ou occupée par un autre gestionnaire, la commande ne doit pas bloquer le thread de réception WebSocket de l'agent. Si elle échoue ou expire, elle doit renvoyer une réponse d'échec propre à la Gateway afin d'arrêter l'animation de chargement sur l'interface.
