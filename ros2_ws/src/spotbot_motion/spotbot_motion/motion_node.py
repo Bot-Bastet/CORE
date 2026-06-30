@@ -55,7 +55,7 @@ class MotionNode(Node):
         self._vx    = 0.0
         self._vy    = 0.0
         self._omega = 0.0
-        self._mode  = 'stand'  # 'stand', 'walk', 'sit', 'stop'
+        self._mode  = 'stop'  # 'stand', 'walk', 'sit', 'stop'
 
         # Publishers
         self._joint_angles_pub = self.create_publisher(

@@ -101,6 +101,58 @@ cp ost.yaml ~/ros2_ws/src/ORB_SLAM3_ROS2/config/camera_calibration.yaml
 
 ---
 
+
+### Calibration Stéréo (2 caméras)
+
+> [!IMPORTANT]
+> La calibration stéréo est nécessaire UNIQUEMENT si vous avez 2 caméras USB connectées.
+> Elle permet de calculer la matrice de transformation entre les deux caméras pour le SLAM stéréo.
+
+#### Prérequis
+- Les deux caméras doivent être calibrées individuellement en mono (voir section ci-dessus)
+- Les fichiers `camera_stereo_left.yaml` et `camera_stereo_right.yaml` doivent exister dans `config/`
+
+#### Étape 1 — Positionner les caméras
+Fixez les deux caméras rigidement l'une par rapport à l'autre (sur le robot). La distance entre les caméras (baseline) doit être d'environ 10-15 cm.
+
+#### Étape 2 — Lancer la calibration stéréo
+```bash
+source /opt/ros2_jazzy/install/setup.bash
+source ~/ros2_ws/install/setup.bash
+
+# Lancer les deux nœuds caméra
+ros2 run usb_cam usb_cam_node_exe --ros-args -r __name:=camera_left -p video_device:=/dev/video0 &
+ros2 run usb_cam usb_cam_node_exe --ros-args -r __name:=camera_right -p video_device:=/dev/video2 &
+
+# Lancer la calibration stéréo
+ros2 run camera_calibration cameracalibrator \
+  --size 8x6 \
+  --square 0.025 \
+  --approximate 0.1 \
+  --ros-args -r right:=/camera_right/image_raw -r left:=/camera_left/image_raw \
+  -r right_camera:=/camera_right/camera_info -r left_camera:=/camera_left/camera_info
+```
+
+#### Étape 3 — Effectuer la calibration
+Présentez la mire devant les DEUX caméras simultanément depuis plusieurs angles. Les barres de progression (X, Y, Size, Skew) doivent passer au vert pour les deux caméras. Cliquez sur **"Calibrate"** puis **"Save"**.
+
+#### Étape 4 — Copier les fichiers générés
+```bash
+cd /tmp
+tar -xzf calibrationdata.tar.gz
+
+# Copier les matrices stéréo dans la config du projet
+cp left.yaml ~/ros2_ws/src/ORB_SLAM3_ROS2/config/camera_stereo_left.yaml
+cp right.yaml ~/ros2_ws/src/ORB_SLAM3_ROS2/config/camera_stereo_right.yaml
+
+# Le fichier ost.yaml contient les paramètres de transformation stéréo
+# Il est utilisé automatiquement par ORB-SLAM3 en mode stéréo
+cp ost.yaml ~/ros2_ws/src/ORB_SLAM3_ROS2/config/stereo_transform.yaml
+```
+
+> **Note :** Le mode stéréo est automatiquement détecté au démarrage si 2 caméras sont connectées.
+> Le fichier `run_slam.sh` sélectionne automatiquement le mode Mono ou Stéréo.
+
 ## 🤖 ROADMAP : CORE (Système Embarqué - Robot / ROS 2)
 
 Ici, la priorité reste la mécanique, la navigation et la survie. Les fonctionnalités de traitement lourd, y compris l'audio, viennent en dernier.

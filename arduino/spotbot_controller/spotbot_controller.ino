@@ -40,10 +40,11 @@
 // ============================================================
 #define SKETCH_VERSION    "v0.2.7"
 #define NUM_SERVOS        12
-#define SERIAL_BAUD       115200
-#define IMU_PUBLISH_MS    20      // 50 Hz
+#define SERIAL_BAUD       500000
+#define IMU_PUBLISH_MS    50      // 20 Hz
 #define WATCHDOG_MS       3000
 #define JSON_BUFFER_SIZE  320
+#define SERVO_SPEED       1.0f    // deg/loop (~50 deg/s a 50Hz) — bon compromis visuel/securite
 
 // ---- Pins servos (D2-D13) ----
 const uint8_t SERVO_PINS[NUM_SERVOS] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
@@ -54,6 +55,8 @@ const uint8_t SERVO_PINS[NUM_SERVOS] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 #define BNO085_ADDR     0x4A
 
 // ---- HC-SR04 ----
+// Sonar optionnel — activable via #define
+#define SONAR_ENABLED false   // Mettre a true si le HC-SR04 est installe
 #define SONAR_TRIG_PIN  22
 #define SONAR_ECHO_PIN  23
 #define SONAR_ALERT_CM  30.0f
@@ -72,6 +75,7 @@ const float SERVO_SIT[NUM_SERVOS]   = {90,120,60, 90,120,60, 90,120,60, 90,120,6
 // ============================================================
 Servo  servos[NUM_SERVOS];
 float  servo_targets[NUM_SERVOS];
+float  servo_current[NUM_SERVOS];
 char   json_buf[JSON_BUFFER_SIZE];
 int    json_pos = 0;
 bool   bno_ok   = false;
@@ -101,26 +105,31 @@ float cached_sonar_dist = -1.0f;
 // Setup
 // ============================================================
 void setup() {
+    // ⚠️ URGENCE : forcer TOUS les pins servos à LOW IMMÉDIATEMENT
+    // pour éviter tout twitching parasite pendant le boot.
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        pinMode(SERVO_PINS[i], OUTPUT);
+        digitalWrite(SERVO_PINS[i], LOW);
+        servo_targets[i] = SERVO_STAND[i];
+        servo_current[i] = SERVO_STAND[i];
+    }
+    delay(50);  // Stabilisation des signaux avant d'initialiser le reste
+
     Serial.begin(SERIAL_BAUD);
     delay(100);
-
-    // Servos — attachés SANS émettre de signal (détachés après)
-    // Les servos ne bougent PAS au démarrage ; ils attendent la 1ère commande
-    for (int i = 0; i < NUM_SERVOS; i++) {
-        servo_targets[i] = SERVO_STAND[i];
-        // On n'attache pas et n'écrit pas : les servos restent libres
-    }
 
     // I2C — 400 kHz Fast Mode
     Wire.begin();
     Wire.setClock(400000);
 
+    // print debug
+    Serial.println("{\"boot\":\"pre-init\"}");
+    Serial.flush();
+
     // BNO085
     pinMode(BNO085_INT_PIN, INPUT_PULLUP);
-    pinMode(BNO085_RST_PIN, OUTPUT);
-    digitalWrite(BNO085_RST_PIN, HIGH);
 
-    bno_ok = bno.begin(BNO085_ADDR, Wire, BNO085_INT_PIN, BNO085_RST_PIN);
+    bno_ok = bno.begin(BNO085_ADDR, Wire);
     if (bno_ok) {
         bno.enableRotationVector(20);
         bno.enableLinearAccelerometer(20);
@@ -160,10 +169,13 @@ void loop() {
 
     if (bno_ok) readBNO085();
 
-    if (millis() - last_sonar_ms >= 100) {
-        last_sonar_ms = millis();
-        cached_sonar_dist = readSonar();
-    }
+#if SONAR_ENABLED
+    // Sonar actif — lire et filtrer
+    cached_sonar_dist = readSonar();
+#else
+    cached_sonar_dist = -1.0f;
+    sonar_valid = false;
+#endif
 
     if ((millis() - last_imu_ms) >= IMU_PUBLISH_MS) {
         last_imu_ms = millis();
@@ -230,6 +242,13 @@ void readSerial() {
 }
 
 void parseJSON(const char* json) {
+    int len = strlen(json);
+    while (len > 0 && (json[len - 1] == ' ' || json[len - 1] == '\t' || json[len - 1] == '\r' || json[len - 1] == '\n')) {
+        len--;
+    }
+    if (len < 2 || json[len - 1] != '}') {
+        return;
+    }
     last_cmd_ms   = millis();
     watchdog_mode = false;
     if (strstr(json, "\"servos\""))       parseServos(json);
@@ -247,12 +266,26 @@ void parseServos(const char* json) {
         angles[n++] = atof(p);
         while (*p && *p != ',' && *p != ']') p++;
     }
-    // Activer et attacher les servos dès la 1ère commande d'angles reçue
-    servos_enabled = true;
-    for (int i = 0; i < n && i < NUM_SERVOS; i++) {
-        if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
-        servo_targets[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+    if (n == NUM_SERVOS) {
+        servos_enabled = true;
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            if (!servos[i].attached()) {
+                servos[i].attach(SERVO_PINS[i]);
+                servo_current[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+            }
+            servo_targets[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+        }
     }
+}
+
+float parseNumAfterKey(const char* json, const char* key) {
+    const char* p = strstr(json, key);
+    if (!p) return -999.0f;
+    p += strlen(key);
+    while (*p && (*p == ' ' || *p == ':' || *p == '"' || *p == '\t')) {
+        p++;
+    }
+    return atof(p);
 }
 
 void parseCmd(const char* json) {
@@ -260,6 +293,40 @@ void parseCmd(const char* json) {
     else if (strstr(json, "\"sit\""))       setSit();
     else if (strstr(json, "\"stop\""))      stopServos();
     else if (strstr(json, "\"reset_imu\"")) resetBNO085();
+    else if (strstr(json, "\"attach\"")) {
+        float val = parseNumAfterKey(json, "\"index\"");
+        if (val != -999.0f) {
+            int idx = (int)val;
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
+                servos_enabled = true;
+            }
+        }
+    }
+    else if (strstr(json, "\"detach\"")) {
+        float val = parseNumAfterKey(json, "\"index\"");
+        if (val != -999.0f) {
+            int idx = (int)val;
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                servos[idx].detach();
+                pinMode(SERVO_PINS[idx], OUTPUT);
+                digitalWrite(SERVO_PINS[idx], LOW);
+            }
+        }
+    }
+    else if (strstr(json, "\"write\"")) {
+        float idx_val = parseNumAfterKey(json, "\"index\"");
+        float ang_val = parseNumAfterKey(json, "\"angle\"");
+        if (idx_val != -999.0f && ang_val != -999.0f) {
+            int idx = (int)idx_val;
+            float ang = ang_val;
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
+                servo_targets[idx] = constrain(ang, SERVO_MIN, SERVO_MAX);
+                servos_enabled = true;
+            }
+        }
+    }
 }
 
 void resetBNO085() {
@@ -293,13 +360,23 @@ void stopServos() {
     servos_enabled = false;
     for (int i = 0; i < NUM_SERVOS; i++) {
         servos[i].detach();
+        pinMode(SERVO_PINS[i], OUTPUT);
+        digitalWrite(SERVO_PINS[i], LOW);
     }
     Serial.println("{\"info\":\"servos_stopped\"}");
 }
 void applyServos() {
     if (!servos_enabled) return;
     for (int i = 0; i < NUM_SERVOS; i++) {
-        if (servos[i].attached()) servos[i].write((int)servo_targets[i]);
+        if (servos[i].attached()) {
+            float diff = servo_targets[i] - servo_current[i];
+            if (diff <= SERVO_SPEED && diff >= -SERVO_SPEED) {
+                servo_current[i] = servo_targets[i];
+            } else {
+                servo_current[i] += (diff > 0.0f ? SERVO_SPEED : -SERVO_SPEED);
+            }
+            servos[i].write((int)servo_current[i]);
+        }
     }
 }
 

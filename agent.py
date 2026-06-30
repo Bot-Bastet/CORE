@@ -91,20 +91,18 @@ def get_system_metrics() -> dict:
     return metrics
 
 def is_spotbot_service_active() -> bool:
-    try:
-        res = subprocess.run(
-            ["systemctl", "is-active", "spotbot.service"],
-            capture_output=True,
-            text=True
-        )
-        return res.stdout.strip() == "active"
-    except Exception:
-        return False
+    # The agent IS the service. If this code runs, the agent is alive.
+    # Calling systemctl every 5s is slow and causes intermittent POST
+    # failures to the Gateway, which makes the dashboard flicker.
+    return True
 
-def trigger_updater():
-    print("[Agent] Lancement de la mise à jour...")
+def trigger_updater(version=None):
+    print(f"[Agent] Lancement de la mise à jour... (version: {version or 'latest'})")
     try:
-        subprocess.Popen(["sudo", "python3", "/opt/spotbot/updater.py"])
+        cmd = ["sudo", "python3", "/opt/spotbot/updater.py"]
+        if version:
+            cmd.append(version)
+        subprocess.Popen(cmd)
     except Exception as e:
         print(f"[Agent] Erreur lancement updater : {e}")
 
@@ -244,12 +242,25 @@ def stop_camera_stream(cam_id: int):
 ARDUINO_VERSION_FILE = Path("/opt/spotbot/arduino_version.txt")
 
 def get_arduino_version() -> str:
+    robot_ver = get_version()
     if ARDUINO_VERSION_FILE.exists():
         try:
-            return ARDUINO_VERSION_FILE.read_text().strip()
+            arduino_ver = ARDUINO_VERSION_FILE.read_text().strip()
+            # Si la version du robot est plus récente, forcer la synchro
+            if robot_ver != arduino_ver:
+                print(f"[Agent] Sync Arduino version: {arduino_ver} -> {robot_ver}")
+                ARDUINO_VERSION_FILE.write_text(robot_ver)
+                return robot_ver
+            return arduino_ver
         except Exception:
             pass
-    return "v0.0.0"
+    # Fichier inexistant : créer avec la version robot
+    try:
+        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ARDUINO_VERSION_FILE.write_text(robot_ver)
+    except Exception:
+        pass
+    return robot_ver
 
 def report_arduino_progress(status: str, percent: int):
     try:
@@ -490,7 +501,21 @@ def flash_arduino_task():
         # ── 8. Sauvegarde version ──────────────────────────────────────────
         version = get_version()
         ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         ARDUINO_VERSION_FILE.write_text(version)
+        print(f"[Agent] Version Arduino enregistree : {version}")
+    except Exception as e_write:
+        print(f"[Agent] Erreur ecriture version Arduino: {e_write}")
+        try:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+            tmp.write(version)
+            tmp.close()
+            subprocess.run(['sudo', 'mv', tmp.name, str(ARDUINO_VERSION_FILE)], check=True, timeout=5)
+            print(f"[Agent] Version Arduino ecrite via sudo: {version}")
+        except Exception as e_sudo:
+            print(f"[Agent] Echec ecriture version Arduino (meme via sudo): {e_sudo}")
         print(f"[Agent] ✓ Version Arduino enregistrée : {version}")
 
         report_arduino_progress("idle", 100)
@@ -513,13 +538,174 @@ def flash_arduino_task():
 def trigger_arduino_flash():
     threading.Thread(target=flash_arduino_task, daemon=True).start()
 
+# ─── CALIBRATION OFFSETS SYNC ────────────────────────────────────────────────
+
+CALIBRATION_FILE = Path("/opt/spotbot/config/calibration.json")
+
+def fetch_offsets_from_gateway():
+    """Au démarrage, récupère les offsets de calibration depuis la Gateway
+    et les sauvegarde localement + les publie au ros2_listener.
+    Ainsi, même si les offsets ont été sauvegardés via le dashboard
+    pendant que le robot était éteint, ils sont appliqués au boot."""
+    global ros2_process
+    time.sleep(5)  # Attendre que ros2_listener soit prêt
+    try:
+        url = f"{GATEWAY_URL}/core/calibration"
+        req = urllib.request.Request(
+            url,
+            headers={"X-API-Token": API_TOKEN},
+            method="GET"
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            offsets = data.get("offsets", [0.0] * 12)
+            if len(offsets) != 12:
+                offsets = [0.0] * 12
+
+        # Sauvegarder localement
+        CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CALIBRATION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"offsets": offsets}, f)
+        print(f"[Agent] Offsets récupérés depuis la Gateway : {offsets}")
+
+        # Publier au ros2_listener pour les appliquer immédiatement
+        if ros2_process and ros2_process.stdin and ros2_process.stdin.writable():
+            ros2_process.stdin.write(
+                json.dumps({"type": "motor_calibration", "offsets": offsets}) + "\n"
+            )
+            ros2_process.stdin.flush()
+            print("[Agent] Offsets transmis au ros2_listener pour application.")
+    except Exception as e:
+        print(f"[Agent] Impossible de récupérer les offsets depuis la Gateway : {e}")
+        print("[Agent] Les offsets locaux existants seront utilisés (si présents).")
+
+# ─── CAMERA CALIBRATION SYNC FROM GATEWAY ───────────────────────────────────
+
+CAMERA_CALIB_LEFT_FILE = Path("/opt/spotbot/config/camera_stereo_left.yaml")
+CAMERA_CALIB_RIGHT_FILE = Path("/opt/spotbot/config/camera_stereo_right.yaml")
+CAMERA_CALIB_MONO_FILE = Path("/opt/spotbot/config/camera_calibration.yaml")
+
+def _json_calib_to_yaml(calib: dict) -> str:
+    """Convertit un dict JSON de calibration caméra en YAML ROS camera_info.
+    Format multi-ligne indenté, compatible yaml-cpp (usb_cam)."""
+    def fmt_num(x):
+        """Formate un nombre: entier si pas de partie décimale, sinon float."""
+        if isinstance(x, float) and x == int(x):
+            return f"{int(x)}.0"
+        return str(float(x)) if isinstance(x, (int, float)) else str(x)
+
+    def fmt_matrix(rows, cols, data, indent=4):
+        """Formate une matrice en multi-ligne indentée (style ROS usb_cam)."""
+        lines = []
+        for r in range(rows):
+            row_data = [fmt_num(data[r * cols + c]) for c in range(cols)]
+            prefix = " " * indent
+            lines.append(f"{prefix}{', '.join(row_data)}")
+        return ",\n".join(lines)
+
+    lines = ["%YAML:1.0"]
+    lines.append(f"image_width: {calib.get('image_width', 640)}")
+    lines.append(f"image_height: {calib.get('image_height', 480)}")
+    lines.append(f"camera_name: {calib.get('camera_name', 'usb_cam')}")
+    lines.append("")
+
+    # camera_matrix
+    cm = calib.get("camera_matrix", {})
+    lines.append("camera_matrix:")
+    lines.append(f"  rows: {cm.get('rows', 3)}")
+    lines.append(f"  cols: {cm.get('cols', 3)}")
+    data = cm.get("data", [600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0])
+    lines.append(f"  data: [{fmt_matrix(3, 3, data)}]")
+    lines.append("")
+
+    lines.append(f"distortion_model: {calib.get('distortion_model', 'plumb_bob')}")
+    lines.append("")
+
+    # distortion_coefficients
+    dc = calib.get("distortion_coefficients", {})
+    lines.append("distortion_coefficients:")
+    lines.append(f"  rows: {dc.get('rows', 1)}")
+    lines.append(f"  cols: {dc.get('cols', 5)}")
+    ddata = dc.get("data", [0.0, 0.0, 0.0, 0.0, 0.0])
+    lines.append(f"  data: [{fmt_matrix(1, 5, ddata)}]")
+    lines.append("")
+
+    # rectification_matrix
+    rm = calib.get("rectification_matrix", {})
+    lines.append("rectification_matrix:")
+    lines.append(f"  rows: {rm.get('rows', 3)}")
+    lines.append(f"  cols: {rm.get('cols', 3)}")
+    rdata = rm.get("data", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+    lines.append(f"  data: [{fmt_matrix(3, 3, rdata)}]")
+    lines.append("")
+
+    # projection_matrix
+    pm = calib.get("projection_matrix", {})
+    lines.append("projection_matrix:")
+    lines.append(f"  rows: {pm.get('rows', 3)}")
+    lines.append(f"  cols: {pm.get('cols', 4)}")
+    pdata = pm.get("data", [600.0, 0.0, 320.0, 0.0, 0.0, 600.0, 240.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    lines.append(f"  data: [{fmt_matrix(3, 4, pdata)}]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def fetch_camera_cals_from_gateway():
+    """Au démarrage, récupère les calibrations caméra depuis la Gateway
+    et les sauvegarde en YAML sur le robot.
+    Ainsi, les calibrations sauvegardées via le dashboard sont appliquées
+    au prochain boot, même si le robot était éteint lors de la sauvegarde."""
+    time.sleep(7)  # Attendre que le réseau + ros2_listener soient prêts
+
+    # Caméra 1 : fetch une seule fois, écrit dans mono ET stereo_left
+    try:
+        url = f"{GATEWAY_URL}/core/camera/calibration/1"
+        req = urllib.request.Request(
+            url,
+            headers={"X-API-Token": API_TOKEN},
+            method="GET"
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            calib1 = json.loads(resp.read().decode("utf-8"))
+
+        yaml1 = _json_calib_to_yaml(calib1)
+        for path in [CAMERA_CALIB_MONO_FILE, CAMERA_CALIB_LEFT_FILE]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(yaml1)
+        print(f"[Agent] Calibration caméra 1 récupérée → camera_calibration.yaml + camera_stereo_left.yaml")
+    except Exception as e:
+        print(f"[Agent] Impossible de récupérer la calibration caméra 1: {e}")
+        print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
+
+    # Caméra 2 : fetch séparé (peut avoir des paramètres différents)
+    try:
+        url = f"{GATEWAY_URL}/core/camera/calibration/2"
+        req = urllib.request.Request(
+            url,
+            headers={"X-API-Token": API_TOKEN},
+            method="GET"
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            calib2 = json.loads(resp.read().decode("utf-8"))
+
+        yaml2 = _json_calib_to_yaml(calib2)
+        CAMERA_CALIB_RIGHT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CAMERA_CALIB_RIGHT_FILE, "w", encoding="utf-8") as f:
+            f.write(yaml2)
+        print(f"[Agent] Calibration caméra 2 récupérée → camera_stereo_right.yaml")
+    except Exception as e:
+        print(f"[Agent] Impossible de récupérer la calibration caméra 2: {e}")
+        print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
+
 # ─── ROS 2 TELEMETRY SUBPROCESS ───────────────────────────────────────────────
 
 def start_ros2_listener():
     global ros2_process, latest_telemetry
     cmd = [
         "bash", "-c",
-        "source /opt/ros2_jazzy/install/setup.bash && source /opt/spotbot/ros2_ws/install/setup.bash && python3 /opt/spotbot/ros2_listener.py"
+        "source /opt/ros2_jazzy/install/setup.bash && source /opt/spotbot/ros2_ws/install/setup.bash && python3 -u /opt/spotbot/ros2_listener.py"
     ]
     try:
         print("[Agent] Démarrage du subprocess ros2_listener...")
@@ -527,7 +713,7 @@ def start_ros2_listener():
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, # Capture stderr for debugging
             text=True,
             bufsize=1
         )
@@ -537,6 +723,9 @@ def start_ros2_listener():
             for line in ros2_process.stdout:
                 try:
                     data = json.loads(line.strip())
+                    # Only print once in a while to not flood the journal
+                    if int(time.time()) % 10 == 0:
+                        print(f"[Agent] Télémétrie reçue avec succès du listener: {list(data.keys())}")
                     data["ai_state"] = {
                         "tts": tts_target,
                         "stt": stt_target,
@@ -545,11 +734,15 @@ def start_ros2_listener():
                         "face_rec": face_rec_state
                     }
                     latest_telemetry = data
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Agent] Erreur décodage ligne de télémétrie: {e}. Ligne brute: {line.strip()[:100]}")
                     
-        t = threading.Thread(target=read_stdout, daemon=True)
-        t.start()
+        def read_stderr():
+            for line in ros2_process.stderr:
+                print(f"[Agent - Listener Error] {line.strip()}")
+                
+        threading.Thread(target=read_stdout, daemon=True).start()
+        threading.Thread(target=read_stderr, daemon=True).start()
     except Exception as e:
         print(f"[Agent] Erreur démarrage ros2_listener: {e}")
 
@@ -778,12 +971,56 @@ def forget_wifi_network(ssid: str) -> dict:
 
 # ─── MAIN LOOPS ───────────────────────────────────────────────────────────────
 
+# ─── Arduino Debounce ──────────────────────────────────────────────────────
+arduino_stable_state = True    # current stable state reported to dashboard
+arduino_miss_count = 0         # consecutive checks where is_arduino_connected() returned False
+arduino_hit_count = 0          # consecutive checks where it returned True (to come back online)
+ARDUINO_DEBOUNCE_THRESHOLD = 3 # number of consecutive checks before flipping state
+
+# ─── Hibernation Grace Period ─────────────────────────────────────────────
+hibernation_deadline = 0  # timestamp after which hibernation is confirmed
+HIBERNATION_GRACE_SEC = 30  # wait 30s before declaring hibernation
+
+def get_arduino_stable_state() -> bool:
+    """Return the debounced Arduino connection state.
+    Uses hysteresis: requires ARDUINO_DEBOUNCE_THRESHOLD consecutive
+    identical readings before flipping the stable state."""
+    global arduino_stable_state, arduino_miss_count, arduino_hit_count
+    raw = is_arduino_connected()
+    if raw:
+        arduino_miss_count = 0
+        arduino_hit_count += 1
+        if arduino_hit_count >= ARDUINO_DEBOUNCE_THRESHOLD:
+            arduino_stable_state = True
+            arduino_hit_count = ARDUINO_DEBOUNCE_THRESHOLD  # cap
+    else:
+        arduino_hit_count = 0
+        arduino_miss_count += 1
+        if arduino_miss_count >= ARDUINO_DEBOUNCE_THRESHOLD:
+            arduino_stable_state = False
+            arduino_miss_count = ARDUINO_DEBOUNCE_THRESHOLD  # cap
+    return arduino_stable_state
+
 def update_status_loop():
+    global hibernation_deadline
     print("[Agent] Démarrage du rapport d'état périodique...")
     while True:
         try:
             active = is_spotbot_service_active()
-            status = "online" if active else "hibernating"
+            now = time.time()
+            if active:
+                status = "online"
+                hibernation_deadline = 0  # reset grace period
+            elif hibernation_deadline == 0:
+                # Service just stopped → start grace period
+                hibernation_deadline = now + HIBERNATION_GRACE_SEC
+                status = "online"  # still show online during grace period
+            elif now < hibernation_deadline:
+                # Still within grace period
+                status = "online"
+            else:
+                # Grace period expired → confirmed hibernation
+                status = "hibernating"
             
             metrics = get_system_metrics()
             cpu_percent = min(int(metrics.get("cpu_load_1m", 0.0) * 25), 100)
@@ -809,7 +1046,7 @@ def update_status_loop():
                     "spotbot_service": "active" if active else "inactive",
                     "cam1_connected": check_camera_connected(1),
                     "cam2_connected": check_camera_connected(2),
-                    "arduino_connected": is_arduino_connected()
+                    "arduino_connected": get_arduino_stable_state()
                 },
                 "ai_state": {
                     "tts": tts_target,
@@ -819,6 +1056,9 @@ def update_status_loop():
                     "face_rec": face_rec_state
                 }
             }
+            
+            # Log ce qui est sur le point d'être posté (DEBUG)
+            print(f"[Agent] POST status={status}, active={active}, arduino={payload['sensors']['arduino_connected']}")
             
             req = urllib.request.Request(
                 f"{GATEWAY_URL}/core/state",
@@ -832,6 +1072,7 @@ def update_status_loop():
             
             with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as resp:
                 resp.read()
+                print(f"[Agent] POST OK status={status}")
                 
         except Exception as e:
             print(f"[Agent] Erreur envoi état : {e}")
@@ -875,14 +1116,16 @@ def start_websocket_client():
                     
                     # Concurrently broadcast telemetry data
                     async def send_telemetry_loop():
-                        last_sent = None
                         while True:
                             global latest_telemetry
-                            if latest_telemetry and latest_telemetry != last_sent:
+                            if latest_telemetry:
                                 try:
+                                    # Print debug once in a while
+                                    if int(time.time()) % 10 == 0:
+                                        print(f"[Agent - WS Send] Envoi télémétrie périodique: {list(latest_telemetry.keys())}")
                                     await ws.send(json.dumps(latest_telemetry))
-                                    last_sent = latest_telemetry
-                                except Exception:
+                                except Exception as e:
+                                    print(f"[Agent - WS Send] Erreur lors de l'envoi WebSocket: {e}")
                                     break
                             await asyncio.sleep(0.5)
                             
@@ -896,8 +1139,9 @@ def start_websocket_client():
                                 msg_type = data.get("type")
                                 
                                 if msg_type == "trigger_update":
-                                    print("[Agent] Commande de mise à jour reçue !")
-                                    trigger_updater()
+                                    version = data.get("version")
+                                    print(f"[Agent] Commande de mise à jour reçue ! (version: {version or 'latest'})")
+                                    trigger_updater(version)
                                     
                                 elif msg_type == "trigger_arduino_flash":
                                     print("[Agent] Commande de flash Arduino reçue !")
@@ -941,10 +1185,12 @@ def start_websocket_client():
                                     cmd = data.get("cmd", "")
                                     print(f"[Agent] Commande Arduino reçue : {cmd}")
                                     if ros2_process and ros2_process.stdin:
-                                        ros2_process.stdin.write(json.dumps({"type": "arduino_cmd", "cmd": cmd}) + "\n")
+                                        # FIX: forward le message COMPLET (index, angle, etc.) au lieu de juste {"type":"arduino_cmd","cmd":cmd}
+                                        ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
                                         
                                 elif msg_type == "manual_joint_control":
+                                    print("[Agent] Commande de contrôle manuel des articulations reçue !")
                                     if ros2_process and ros2_process.stdin:
                                         ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
@@ -1127,6 +1373,12 @@ if __name__ == "__main__":
     
     # Démarrer le subprocess ROS 2
     start_ros2_listener()
+    
+    # Récupérer les offsets de calibration depuis la Gateway au démarrage
+    threading.Thread(target=fetch_offsets_from_gateway, daemon=True).start()
+    
+    # Récupérer les calibrations caméra depuis la Gateway au démarrage
+    threading.Thread(target=fetch_camera_cals_from_gateway, daemon=True).start()
     
     # Thread 1: Envoi périodique de l'état (REST)
     t_status = threading.Thread(target=update_status_loop, daemon=True)

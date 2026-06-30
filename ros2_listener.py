@@ -10,6 +10,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState, Imu, Image
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32MultiArray, String
+from geometry_msgs.msg import PoseStamped, Twist
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
@@ -32,11 +33,15 @@ class ROS2TelemetryListener(Node):
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.create_subscription(Imu, '/imu/data', self.imu_callback, qos_best_effort)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.create_subscription(PoseStamped, '/orb_slam3/camera_pose', self.slam_pose_callback, 10)
         
         # Publisher for calibration offsets
         self.calib_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_calibration', 10)
         self.angles_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_angles', 10)
         self.motion_pub = self.create_publisher(String, '/cmd_motion', 10)
+        self.pose_pub = self.create_publisher(String, '/cmd_pose', 10)
+        self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         
         # Timer to print state to stdout as JSON (2 Hz)
         self.create_timer(0.5, self.publish_telemetry)
@@ -78,10 +83,8 @@ class ROS2TelemetryListener(Node):
             "yaw": round(math.degrees(yaw), 1)
         }
         
-    def odom_callback(self, msg):
-        pos = msg.pose.pose.position
-        ori = msg.pose.pose.orientation
-        
+    def _update_pose_from_msg(self, pos, ori):
+        """Met a jour self.pose et self.path depuis une position + orientation."""
         siny_cosp = 2 * (ori.w * ori.z + ori.x * ori.y)
         cosy_cosp = 1 - 2 * (ori.y * ori.y + ori.z * ori.z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -97,6 +100,12 @@ class ROS2TelemetryListener(Node):
             self.path.append({"x": self.pose["x"], "y": self.pose["y"], "theta": self.pose["theta"]})
             if len(self.path) > 150:
                 self.path.pop(0)
+
+    def odom_callback(self, msg):
+        self._update_pose_from_msg(msg.pose.pose.position, msg.pose.pose.orientation)
+
+    def slam_pose_callback(self, msg):
+        self._update_pose_from_msg(msg.pose.position, msg.pose.orientation)
 
     def check_topics(self):
         try:
@@ -157,6 +166,7 @@ class ROS2TelemetryListener(Node):
                 elif msg_json.get("type") == "manual_joint_control":
                     angles = msg_json.get("angles", [])
                     if len(angles) == 12:
+                        self.get_logger().info(f"Publication de manual_joint_control sur /cmd_joint_angles: {angles}")
                         ang_msg = Float32MultiArray()
                         ang_msg.data = [float(x) for x in angles]
                         self.angles_pub.publish(ang_msg)
@@ -164,8 +174,31 @@ class ROS2TelemetryListener(Node):
                     cmd = msg_json.get("cmd", "")
                     if cmd:
                         motion_msg = String()
-                        motion_msg.data = cmd
+                        if cmd in ["attach", "detach", "write"]:
+                            # Strip "type" key to reduce serial payload (Arduino RX buffer = 64 bytes)
+                            compact = {}
+                            for k in ["cmd", "index", "angle"]:
+                                if k in msg_json:
+                                    compact[k] = msg_json[k]
+                            motion_msg.data = json.dumps(compact)
+
+                        else:
+                            motion_msg.data = cmd
+                            self.pose_pub.publish(motion_msg)
                         self.motion_pub.publish(motion_msg)
+                elif msg_json.get("type") == "cmd_vel":
+                    twist = Twist()
+                    twist.linear.x = float(msg_json.get("linear", 0.0))
+                    twist.angular.z = float(msg_json.get("angular", 0.0))
+                    self.vel_pub.publish(twist)
+                elif msg_json.get("type") == "nav_goal":
+                    goal = PoseStamped()
+                    goal.header.stamp = self.get_clock().now().to_msg()
+                    goal.header.frame_id = "map"
+                    goal.pose.position.x = float(msg_json.get("x", 0.0))
+                    goal.pose.position.y = float(msg_json.get("y", 0.0))
+                    goal.pose.orientation.w = 1.0
+                    self.goal_pub.publish(goal)
                 elif msg_json.get("type") == "start_camera":
                     cam_id = msg_json.get("camera", 1)
                     v_slam = msg_json.get("v_slam", False)

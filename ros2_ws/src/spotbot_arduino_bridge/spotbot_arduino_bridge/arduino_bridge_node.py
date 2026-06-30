@@ -86,6 +86,22 @@ class ArduinoBridgeNode(Node):
             String, '/cmd_motion',
             self._motion_callback, 10
         )
+        self.create_subscription(
+            Float32MultiArray, '/cmd_joint_calibration',
+            self._calib_callback, 10
+        )
+
+        # Charger les offsets existants
+        self._offsets = [0.0] * 12
+        try:
+            p = Path("/opt/spotbot/config/calibration.json")
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self._offsets = data.get("offsets", [0.0] * 12)
+                self.get_logger().info(f"Offsets charges depuis le fichier : {self._offsets}")
+        except Exception as e:
+            self.get_logger().error(f"Erreur chargement offsets : {e}")
 
         self._serial: serial.Serial | None = None
         self._connected = False
@@ -94,6 +110,9 @@ class ArduinoBridgeNode(Node):
         # Timer principal de lecture
         rate = self.get_parameter('publish_rate').value
         self._timer = self.create_timer(1.0 / rate, self._spin_serial)
+        
+        # Timer de heartbeat (1 Hz) pour le watchdog
+        self._heartbeat_timer = self.create_timer(1.0, self._send_heartbeat)
 
         self.get_logger().info('Arduino Bridge Node demarré. Auto-detection du port...')
         self._try_connect()
@@ -142,7 +161,13 @@ class ArduinoBridgeNode(Node):
 
         try:
             self._serial = serial.Serial(port, self._baudrate, timeout=self.READ_TIMEOUT)
-            time.sleep(2.0)  # Attendre reset Arduino
+            # Reset hardware de l'Arduino Mega
+            self._serial.dtr = False
+            self._serial.rts = False
+            time.sleep(0.5)
+            self._serial.dtr = True
+            self._serial.rts = True
+            time.sleep(2.5)  # Attendre reset Arduino et fin du bootloader
             self._serial.reset_input_buffer()
             self._connected = True
             self.get_logger().info(f'Arduino connecte sur {port} @ {self._baudrate} baud')
@@ -204,10 +229,16 @@ class ArduinoBridgeNode(Node):
             if self._serial.in_waiting:
                 line = self._serial.readline().decode('utf-8', errors='ignore').strip()
                 if line:
+                    # self.get_logger().info(f'RAW LINE: {line}')  # Supprimé pour éviter la surcharge de logging
                     self._parse_line(line)
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError, Exception) as e:
             self.get_logger().error(f'Perte connexion Arduino: {e}')
             self._connected = False
+            try:
+                if self._serial:
+                    self._serial.close()
+            except Exception:
+                pass
             self._serial = None
             self._publish_status('disconnected')
 
@@ -216,7 +247,12 @@ class ArduinoBridgeNode(Node):
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
+            if line.strip():
+                self.get_logger().warn(f"Ligne non-JSON reçue de l'Arduino: {line}")
             return
+
+        if 'imu' not in data and 'sonar' not in data and 'version' not in data:
+            self.get_logger().info(f"Message reçu de l'Arduino: {line}")
 
         if 'imu' in data:
             self._publish_imu_bno085(data['imu'])
@@ -297,25 +333,52 @@ class ArduinoBridgeNode(Node):
     # ------------------------------------------------------------------
 
     def _joint_callback(self, msg: Float32MultiArray):
-        """Envoie les angles des 12 servos a l'Arduino."""
+        """Envoie les angles des 12 servos a l'Arduino avec application des offsets."""
         if not self._connected:
             return
         angles = list(msg.data)[:12]
         angles += [90.0] * (12 - len(angles))  # completer si besoin
+        
+        # Appliquer les offsets de calibration
+        for i in range(12):
+            angles[i] += self._offsets[i]
+            
         payload = json.dumps({'servos': [round(a, 1) for a in angles]}) + '\n'
+        if not hasattr(self, '_last_servos_payload') or self._last_servos_payload != payload:
+            self._last_servos_payload = payload
+            self.get_logger().info(f"Envoi au port série de l'Arduino (servos) : {payload.strip()}")
         self._send(payload)
+
+    def _calib_callback(self, msg: Float32MultiArray):
+        """Enregistre les nouveaux offsets de calibration et les sauvegarde."""
+        self._offsets = list(msg.data)[:12]
+        self._offsets += [0.0] * (12 - len(self._offsets))
+        self.get_logger().info(f"Nouveaux offsets recus et appliques : {self._offsets}")
+        try:
+            p = Path("/opt/spotbot/config/calibration.json")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"offsets": self._offsets}, f)
+        except Exception as e:
+            self.get_logger().error(f"Erreur sauvegarde offsets : {e}")
 
     def _motion_callback(self, msg: String):
         """Envoie des commandes macro (stand, sit, walk, stop...)."""
         if not self._connected:
             return
-        payload = json.dumps({'cmd': msg.data}) + '\n'
+        data = msg.data.strip()
+        if data.startswith('{') and data.endswith('}'):
+            payload = data + '\n'
+        else:
+            payload = json.dumps({'cmd': data}) + '\n'
+        self.get_logger().info(f"Envoi au port série de l'Arduino: {payload.strip()}")
         self._send(payload)
 
     def _send(self, data: str):
         try:
             self._serial.write(data.encode('utf-8'))
-        except serial.SerialException as e:
+            self._serial.flush()
+        except (serial.SerialException, OSError, Exception) as e:
             self.get_logger().error(f'Erreur envoi: {e}')
             self._connected = False
 
@@ -333,6 +396,11 @@ class ArduinoBridgeNode(Node):
                 self.get_logger().info(f"Version de l'Arduino detectee et mise a jour : {version}")
         except Exception:
             pass
+
+
+    def _send_heartbeat(self):
+        if self._connected:
+            self._send(json.dumps({'cmd': 'heartbeat'}) + '\n')
 
 
 def main(args=None):

@@ -1,0 +1,54 @@
+%YAML:1.0
+# =============================================================
+# Profil de calibration CAMÉRA DROITE (stéréo)
+# ⚠️  CE FICHIER EST UN PLACEHOLDER.
+#     Vous DEVEZ remplacer ces valeurs par celles obtenues
+#     après avoir exécuté la calibration stéréo (ROS camera_calibration).
+#     Sans calibration réelle, la rectification stéréo et le SLAM 3D
+#     produiront des résultats incorrects.
+#
+# Paramètre CRITIQUE pour la stéréo : projection_matrix Tx
+#   Tx = -baseline * fx  (en pixels)
+#   Baseline par défaut estimée à 6 cm → Tx = -0.06 * 600 = -36
+#   Cette valeur permet à stereo_image_proc de calculer la
+#   disparité gauche-droite pour la profondeur 3D.
+# =============================================================
+
+image_width: 640
+image_height: 480
+
+camera_name: spotbot_right
+
+# Matrice intrinsèque K (mêmes paramètres que la gauche par défaut)
+# Ordre : [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [600.0, 0.0, 320.0,
+           0.0, 600.0, 240.0,
+           0.0,   0.0,   1.0]
+
+distortion_model: plumb_bob
+
+# Coefficients de distorsion (k1, k2, p1, p2, k3)
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Matrice de rectification R (identité par défaut)
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0,
+         0.0, 0.0, 1.0]
+
+# Matrice de projection P = K [I | t] pour la caméra droite
+# Tx = -baseline * fx = -0.06 * 600 = -36  (offset horizontal en pixels)
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [600.0, 0.0, 320.0, -36.0,
+           0.0, 600.0, 240.0,   0.0,
+           0.0,   0.0,   1.0,   0.0]

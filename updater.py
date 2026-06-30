@@ -4,15 +4,23 @@ Vérifie GitHub Releases et effectue git pull + colcon build si une nouvelle ver
 Conçu pour tourner comme un nœud ROS 2 ou un service systemd.
 """
 import os
+import json
 import time
+import warnings  # stdlib — used locally inside report_progress only
 import subprocess
 import requests
+import urllib3
 import logging
 import socket
 from pathlib import Path
 
 # Set global socket timeout to prevent hangs
 socket.setdefaulttimeout(30.0)
+
+# NOTE: we deliberately do NOT call ``urllib3.disable_warnings(...)`` at module
+# scope, so that legitimate SSL errors raised by other HTTPS calls elsewhere in
+# the process still surface in the logs. ``InsecureRequestWarning`` is silenced
+# LOCALLY inside ``report_progress`` via the stdlib ``warnings`` context manager.
 
 logger = logging.getLogger("core_auto_updater")
 
@@ -50,12 +58,53 @@ def _version_tuple(v: str) -> tuple:
 
 
 def report_progress(status: str, percent: int):
+    """Report progress to the Gateway with safe SSL + local-heartbeat fallback.
+
+    Background: the previous implementation called ``requests.post(...)`` with
+    default certificate verification AND swallowed every exception. When the
+    Caddy reverse-proxy uses a self-signed certificate on
+    ``ha.arthonetwork.fr:44888``, every progress POST silently failed and the
+    dashboard was left stuck at ``starting / 0%`` forever (until the 10-min
+    staleness timeout) — even though the actual update was running fine.
+
+    Fix:
+      1. Disable TLS verification (``verify=False``) which matches the
+         behaviour of ``agent.py`` (uses ``ssl.CERT_NONE`` on the same URL).
+      2. Log every transport error instead of swallowing it.
+      3. Write a local heartbeat file (``/var/log/spotbot/agent_update_state.json``)
+         so an operator inspecting the Pi over SSH has a ground-truth record of
+         what the updater was doing at any point, even if the Gateway POST fails.
+    """
+    payload = {"status": status, "percent": percent}
+
+    # 1. Local heartbeat (best-effort, never raises)
     try:
-        url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
-        headers = {"X-API-Token": API_TOKEN}
-        requests.post(url, json={"status": status, "percent": percent}, headers=headers, timeout=5)
-    except Exception:
-        pass
+        hb_dir = Path("/var/log/spotbot")
+        hb_dir.mkdir(parents=True, exist_ok=True)
+        (hb_dir / "agent_update_state.json").write_text(
+            json.dumps({"updated_at": time.time(), **payload}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e_hb:
+        logger.warning(f"[AutoUpdater] \u00e9chec \u00e9criture heartbeat local: {e_hb}")
+
+    # 2. HTTPS POST to the Gateway (verify=False to match agent.py's ssl_ctx)
+    url = "https://ha.arthonetwork.fr:44888/system/update/robot/progress"
+    try:
+        requests.post(
+            url,
+            json=payload,
+            headers={"X-API-Token": API_TOKEN},
+            timeout=8,
+            verify=False,
+        )
+    except Exception as e_post:
+        # Log explicitly so a `journalctl` or ssh session can see why the
+        # dashboard is stuck. Do NOT silently swallow anymore.
+        logger.warning(
+            f"[AutoUpdater] \u00e9chec POST progr\u00e8s Gateway "
+            f"(status={status}, percent={percent}%) : {e_post}"
+        )
 
 
 def check_and_apply_update() -> bool:

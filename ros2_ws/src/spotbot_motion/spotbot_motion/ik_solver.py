@@ -89,10 +89,15 @@ class LegIK:
         return theta_abad, theta_upper, theta_lower
 
     def angles_to_degrees(self, rad_tuple) -> list[float]:
-        """Convertit (abad, upper, lower) de radians en degres."""
+        """Convertit (abad, upper, lower) de radians en degres avec prise en compte du miroir droit/gauche."""
         if None in rad_tuple:
             return [90.0, 90.0, 90.0]
-        return [math.degrees(a) + 90.0 for a in rad_tuple]
+        
+        # Pour le côté droit (side_sign < 0), la rotation physique du servo est inversée
+        if self.side_sign < 0:
+            return [90.0 - math.degrees(a) for a in rad_tuple]
+        else:
+            return [90.0 + math.degrees(a) for a in rad_tuple]
 
 
 class SpotIK:
