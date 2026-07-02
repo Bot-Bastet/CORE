@@ -8,7 +8,7 @@
 |-----------|----------|:---------:|-------|
 | Raspberry Pi 5 (8 Go min) | 1 | | + carte SD 64 Go min (classe A2) |
 | Arduino Mega 2560 | 1 | | Clone compatible OK |
-| Servos MG90S & SG90 | 12 | | **10 MG90S** (pignons métal) + **2 SG90** (plastique) alimentés EN EXTERNE |
+| Servos MG996R | 12 | | **12 MG996R** (pignons métal, couple élevé) alimentés EN EXTERNE |
 | **BNO08x** (IMU principale) | 1 | | Capteur absolu 9-DOF I2C (quaternions fusionnés à bord) |
 | **HC-SR04** (capteur ultrason) | 1 | ✅ Optionnel | Détection d'obstacles < 400 cm |
 | Caméra USB (mono) | 1 ou 2 | | 1 = mono SLAM, 2 = stéréo SLAM |
@@ -22,12 +22,11 @@
 
 ## Schéma de câblage
 
-### 1. Configuration des Servos (10x MG90S & 2x SG90) → Arduino Mega
+### 1. Configuration des Servos (12x MG996R) → Arduino Mega
 
-> **⚠️ CRITIQUE** : Les 12 servos consomment de forts pics de courant en pointe. Utilisez une alimentation externe dédiée 5-6V / 10A minimum. Ne jamais alimenter les servos via le 5V de l'Arduino.
+> **⚠️ CRITIQUE** : Les 12 servos consomment de forts pics de courant en pointe (jusqu'à 15-20A en charge complète). Utilisez une alimentation externe dédiée 6V / 10-20A minimum. Ne jamais alimenter les servos via le 5V de l'Arduino.
 > **Répartition des servos** :
-> - **10 MG90S (pignons métal)** : Recommandés pour les articulations supportant le poids et la force (Knee/Elbow, Lower/Tibia, Upper/Cuisse, et Hip/Abad des pattes avant).
-> - **2 SG90 (pignons plastique)** : Réservés aux hanches arrières (`BL Abad` et `BR Abad` - PIN D8 et D11), qui subissent le moins de charge dynamique.
+> - **12 MG996R (pignons métal)** : Installés sur l'ensemble des 12 articulations pour supporter la structure et assurer des mouvements puissants et fluides.
 
 ```
 Alimentation Externe 5-6V/10A
@@ -39,18 +38,18 @@ Alimentation Externe 5-6V/10A
 
 | Servo | Articulation / Patte | PIN Arduino | Modèle Recommandé |
 |-------|----------------------|-------------|-------------------|
-| 0     | FR Abad (Hanche)     | **D2**      | **MG90S** (Métal) |
-| 1     | FR Upper (Cuisse)    | **D3**      | **MG90S** (Métal) |
-| 2     | FR Lower (Tibia)     | **D4**      | **MG90S** (Métal) |
-| 3     | FL Abad (Hanche)     | **D5**      | **MG90S** (Métal) |
-| 4     | FL Upper (Cuisse)    | **D6**      | **MG90S** (Métal) |
-| 5     | FL Lower (Tibia)     | **D7**      | **MG90S** (Métal) |
-| 6     | BR Abad (Hanche)     | **D8**      | **SG90** (Plastique) |
-| 7     | BR Upper (Cuisse)    | **D9**      | **MG90S** (Métal) |
-| 8     | BR Lower (Tibia)     | **D10**     | **MG90S** (Métal) |
-| 9     | BL Abad (Hanche)     | **D11**     | **SG90** (Plastique) |
-| 10    | BL Upper (Cuisse)    | **D12**     | **MG90S** (Métal) |
-| 11    | BL Lower (Tibia)     | **D13**     | **MG90S** (Métal) |
+| 0     | FR Abad (Hanche)     | **D2**      | **MG996R** (Métal) |
+| 1     | FR Upper (Cuisse)    | **D3**      | **MG996R** (Métal) |
+| 2     | FR Lower (Tibia)     | **D4**      | **MG996R** (Métal) |
+| 3     | FL Abad (Hanche)     | **D5**      | **MG996R** (Métal) |
+| 4     | FL Upper (Cuisse)    | **D6**      | **MG996R** (Métal) |
+| 5     | FL Lower (Tibia)     | **D7**      | **MG996R** (Métal) |
+| 6     | BR Abad (Hanche)     | **D8**      | **MG996R** (Métal) |
+| 7     | BR Upper (Cuisse)    | **D9**      | **MG996R** (Métal) |
+| 8     | BR Lower (Tibia)     | **D10**     | **MG996R** (Métal) |
+| 9     | BL Abad (Hanche)     | **D11**     | **MG996R** (Métal) |
+| 10    | BL Upper (Cuisse)    | **D12**     | **MG996R** (Métal) |
+| 11    | BL Lower (Tibia)     | **D13**     | **MG996R** (Métal) |
 
 > Chaque servo : 3 fils — **Marron/Noir=GND, Rouge=VCC (alim externe), Jaune/Orange/Blanc=Signal (Arduino)**
 
@@ -203,18 +202,18 @@ ros2 topic echo /wifi/alfa_active # std_msgs/Bool  (True = Alfa utilisé)
 ┌─────────────────────────────────────────────────────────┐
 │                   ARDUINO MEGA 2560                      │
 │                                                          │
-│  D2 ──► Servo 0  (FR Abad MG90S) │ I2C SDA(20) ◄─ BNO08x │
-│  D3 ──► Servo 1  (FR Upper MG90S)│ I2C SCL(21) ◄─ BNO08x │
-│  D4 ──► Servo 2  (FR Lower MG90S)│                       │
-│  D5 ──► Servo 3  (FL Abad MG90S) │ D18 (INT)  ◄── BNO08x │
-│  D6 ──► Servo 4  (FL Upper MG90S)│ D19 (RST)  ──► BNO08x │
-│  D7 ──► Servo 5  (FL Lower MG90S)│                       │
-│  D8 ──► Servo 6  (BR Abad SG90)  │                       │
-│  D9 ──► Servo 7  (BR Upper MG90S)│                       │
-│  D10──► Servo 8  (BR Lower MG90S)│                       │
-│  D11──► Servo 9  (BL Abad SG90)  │                       │
-│  D12──► Servo 10 (BL Upper MG90S)│                       │
-│  D13──► Servo 11 (BL Lower MG90S)│                       │
+│  D2 ──► Servo 0  (FR Abad MG996R) │ I2C SDA(20) ◄─ BNO08x │
+│  D3 ──► Servo 1  (FR Upper MG996R)│ I2C SCL(21) ◄─ BNO08x │
+│  D4 ──► Servo 2  (FR Lower MG996R)│                       │
+│  D5 ──► Servo 3  (FL Abad MG996R) │ D18 (INT)  ◄── BNO08x │
+│  D6 ──► Servo 4  (FL Upper MG996R)│ D19 (RST)  ──► BNO08x │
+│  D7 ──► Servo 5  (FL Lower MG996R)│                       │
+│  D8 ──► Servo 6  (BR Abad MG996R) │                       │
+│  D9 ──► Servo 7  (BR Upper MG996R)│                       │
+│  D10──► Servo 8  (BR Lower MG996R)│                       │
+│  D11──► Servo 9  (BL Abad MG996R)  │                       │
+│  D12──► Servo 10 (BL Upper MG996R)│                       │
+│  D13──► Servo 11 (BL Lower MG996R)│                       │
 │                                                          │
 │  GND ◄────────────── GND commun servos + BNO08x          │
 └─────────────────────────────────────────────────────────┘
@@ -343,8 +342,8 @@ avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 \
 
 > **💡 Note de conception importante :** Ce robot est basé sur le design **Spotmicro de KDY0523** (référence Thingiverse [3445283](https://www.thingiverse.com/thing:3445283)).
 >
-> ⚠️ **IMPORTANT :** Pour notre configuration spécifique (10 servos MG90S + 2 SG90 et Arduino Mega 2560) :
-> 1. Vous **devez absolument** utiliser les fichiers comportant le suffixe **`_mg` (Micro Gear)**. Ces fichiers sont modifiés pour s'adapter à la taille des micro-servos (MG90S/SG90). N'imprimez pas les versions standard prévues pour les gros servos MG996R.
+> ⚠️ **IMPORTANT :** Pour notre configuration spécifique avec servos standards **MG996R** :
+> 1. Vous **devez** utiliser les fichiers et dimensions **standards** (sans le suffixe `_mg`). Les pièces d'origine sont parfaitement dimensionnées pour accueillir les gros servos MG996R.
 > 2. Vous **devez** imprimer les plaques et capots conçus pour l'**Arduino Mega** afin d'avoir l'espace nécessaire à l'intérieur du châssis. N'imprimez pas les pièces estampillées `non-mega`.
 
 ### 1. Châssis principal (Main Frame & Covers)
