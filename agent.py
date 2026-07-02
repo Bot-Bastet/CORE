@@ -500,13 +500,12 @@ def flash_arduino_task():
 
         # ── 8. Sauvegarde version ──────────────────────────────────────────
         version = get_version()
-        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
-        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ARDUINO_VERSION_FILE.write_text(version)
-        print(f"[Agent] Version Arduino enregistree : {version}")
-    except Exception as e_write:
-        print(f"[Agent] Erreur ecriture version Arduino: {e_write}")
+            ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ARDUINO_VERSION_FILE.write_text(version)
+            print(f"[Agent] Version Arduino enregistree : {version}")
+        except Exception as e_write:
+            print(f"[Agent] Erreur ecriture version Arduino: {e_write}")
         try:
             import tempfile
             tmp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
