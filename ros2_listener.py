@@ -7,7 +7,7 @@ import threading
 import subprocess
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState, Imu, Image
+from sensor_msgs.msg import JointState, Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32MultiArray, String
 from geometry_msgs.msg import PoseStamped, Twist
@@ -25,8 +25,7 @@ class ROS2TelemetryListener(Node):
         self.topics_list = []
         self.cam_subscribers = {1: None, 2: None}
         self.cam_processes = {1: None, 2: None}
-        self.cam_queues = {1: None, 2: None}
-        self.cam_threads = {1: None, 2: None}
+
         
         # Subscriptions
         qos_best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -37,6 +36,8 @@ class ROS2TelemetryListener(Node):
         
         # Publisher for calibration offsets
         self.calib_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_calibration', 10)
+        # Publisher for streaming commands (delegated to streaming_engine)
+        self.stream_cmd_pub = self.create_publisher(String, '/streaming/command', 10)
         self.angles_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_angles', 10)
         self.motion_pub = self.create_publisher(String, '/cmd_motion', 10)
         self.pose_pub = self.create_publisher(String, '/cmd_pose', 10)
@@ -201,151 +202,17 @@ class ROS2TelemetryListener(Node):
                     self.goal_pub.publish(goal)
                 elif msg_json.get("type") == "start_camera":
                     cam_id = msg_json.get("camera", 1)
-                    v_slam = msg_json.get("v_slam", False)
-                    self.start_cam_stream(cam_id, v_slam)
+                    self.stream_cmd_pub.publish(String(data=json.dumps({"command": "start", "camera": cam_id})))
                 elif msg_json.get("type") == "stop_camera":
                     cam_id = msg_json.get("camera", 1)
-                    self.stop_cam_stream(cam_id)
+                    self.stream_cmd_pub.publish(String(data=json.dumps({"command": "stop", "camera": cam_id})))
             except Exception:
                 pass
 
-    def start_cam_stream(self, cam_id, v_slam=False):
-        self.stop_cam_stream(cam_id)
-        self.cam_queues[cam_id] = queue.Queue(maxsize=1)
-        self.cam_threads[cam_id] = threading.Thread(
-            target=self.ffmpeg_worker,
-            args=(cam_id,),
-            daemon=True
-        )
-        self.cam_threads[cam_id].start()
-
-        if cam_id == 1 and v_slam:
-            topics = ["/orb_slam3/tracking_image"]
-        else:
-            topics = ["/camera/image_raw", "/camera/left/image_raw"] if cam_id == 1 else ["/camera2/image_raw", "/camera/right/image_raw"]
-        self.cam_subscribers[cam_id] = []
-        for topic in topics:
-            sub = self.create_subscription(
-                Image,
-                topic,
-                lambda msg, cid=cam_id: self.image_callback(msg, cid),
-                10
-            )
-            self.cam_subscribers[cam_id].append(sub)
-
-    def stop_cam_stream(self, cam_id):
-        q = self.cam_queues.get(cam_id)
-        if q is not None:
-            self.cam_queues[cam_id] = None
-            try:
-                q.put_nowait(None) # Sentinel to stop thread
-            except Exception:
-                pass
-
-        if self.cam_processes[cam_id] is not None:
-            try:
-                self.cam_processes[cam_id].stdin.close()
-                self.cam_processes[cam_id].terminate()
-                self.cam_processes[cam_id].wait(timeout=1)
-            except Exception:
-                pass
-            self.cam_processes[cam_id] = None
-
-        if self.cam_subscribers[cam_id] is not None:
-            if isinstance(self.cam_subscribers[cam_id], list):
-                for sub in self.cam_subscribers[cam_id]:
-                    if sub is not None:
-                        self.destroy_subscription(sub)
-            else:
-                self.destroy_subscription(self.cam_subscribers[cam_id])
-            self.cam_subscribers[cam_id] = None
-
-    def image_callback(self, msg, cam_id):
-        q = self.cam_queues.get(cam_id)
-        if q is not None:
-            frame_data = {
-                "width": msg.width,
-                "height": msg.height,
-                "encoding": msg.encoding,
-                "data": bytes(msg.data)
-            }
             try:
                 q.put_nowait(frame_data)
             except queue.Full:
                 pass # Drop frame to save CPU and avoid blocking callback thread
-
-    def ffmpeg_worker(self, cam_id):
-        while True:
-            q = self.cam_queues.get(cam_id)
-            if q is None:
-                break
-            try:
-                frame = q.get(timeout=1.0)
-            except queue.Empty:
-                continue
-
-            if frame is None:
-                q.task_done()
-                break
-
-            if self.cam_processes[cam_id] is None:
-                enc = frame["encoding"]
-                pix_fmt = "rgb24"
-                if enc == "rgb8":
-                    pix_fmt = "rgb24"
-                elif enc == "bgr8":
-                    pix_fmt = "bgr24"
-                elif enc in ("yuyv", "yuyv422"):
-                    pix_fmt = "yuyv422"
-                elif enc == "mono8":
-                    pix_fmt = "gray"
-
-                rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-f", "rawvideo",
-                    "-pix_fmt", pix_fmt,
-                    "-s", f"{frame['width']}x{frame['height']}",
-                    "-r", "10",
-                    "-probesize", "32",
-                    "-analyzeduration", "0",
-                    "-i", "-",
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-tune", "zerolatency",
-                    "-profile:v", "baseline",
-                    "-level", "3.0",
-                    "-g", "10",
-                    "-bf", "0",
-                    "-crf", "32",
-                    "-threads", "2",
-                    "-pix_fmt", "yuv420p",
-                    "-f", "rtsp",
-                    "-rtsp_transport", "tcp",
-                    rtsp_url
-                ]
-                try:
-                    log_file = open(f"/tmp/ffmpeg_cam{cam_id}.log", "w")
-                    self.cam_processes[cam_id] = subprocess.Popen(
-                        cmd,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=log_file
-                    )
-                except Exception:
-                    q.task_done()
-                    continue
-
-            proc = self.cam_processes[cam_id]
-            if proc and proc.stdin:
-                try:
-                    proc.stdin.write(frame["data"])
-                    proc.stdin.flush()
-                except Exception:
-                    self.stop_cam_stream(cam_id)
-
-            q.task_done()
 
 def main():
     rclpy.init()

@@ -128,6 +128,13 @@ void setup() {
 
     // BNO085
     pinMode(BNO085_INT_PIN, INPUT_PULLUP);
+    pinMode(BNO085_RST_PIN, OUTPUT);
+
+    // Hardware reset du BNO085 au démarrage pour éviter les freezes I2C
+    digitalWrite(BNO085_RST_PIN, LOW);
+    delay(50);
+    digitalWrite(BNO085_RST_PIN, HIGH);
+    delay(300);
 
     bno_ok = bno.begin(BNO085_ADDR, Wire);
     if (bno_ok) {

@@ -109,30 +109,190 @@ def trigger_updater(version=None):
 CAMERA_MAPPING_FILE = Path("/opt/spotbot/config/camera_mapping.json")
 
 def get_camera_devices() -> dict:
+    """Retourne le mapping des caméras avec leurs empreintes.
+    Format: {1: {"device": "/dev/video0", "fingerprint": "ABC123"}, 2: ...}
+    Compatible avec l'ancien format: {1: "/dev/video0", 2: "/dev/video2"}
+    """
     default_mapping = {
-        1: "/dev/video0",
-        2: "/dev/video2"
+        1: {"device": "/dev/video0", "fingerprint": None},
+        2: {"device": "/dev/video2", "fingerprint": None}
     }
     if CAMERA_MAPPING_FILE.exists():
         try:
             data = json.loads(CAMERA_MAPPING_FILE.read_text())
             left = data.get("left")
             right = data.get("right")
+            # Support both old format (string) and new format (dict with device/fingerprint)
             if left:
-                default_mapping[1] = left
+                if isinstance(left, dict):
+                    default_mapping[1] = left
+                else:
+                    default_mapping[1] = {"device": left, "fingerprint": None}
             if right:
-                default_mapping[2] = right
+                if isinstance(right, dict):
+                    default_mapping[2] = right
+                else:
+                    default_mapping[2] = {"device": right, "fingerprint": None}
         except Exception:
             pass
+    # Fill in missing fingerprints
+    for cam_id in [1, 2]:
+        dev_info = default_mapping[cam_id]
+        if isinstance(dev_info, dict):
+            if not dev_info.get("fingerprint"):
+                dev_info["fingerprint"] = get_camera_fingerprint(dev_info["device"])
+        else:
+            # Old format: just a string
+            dev_path = dev_info
+            default_mapping[cam_id] = {"device": dev_path, "fingerprint": get_camera_fingerprint(dev_path)}
     return default_mapping
 
+def get_camera_fingerprint(device: str) -> str:
+    """Retourne une empreinte unique pour une caméra (USB serial, VID:PID, ou port)."""
+    try:
+        import subprocess
+        # Try udevadm for serial and VID:PID
+        r = subprocess.run(
+            ["udevadm", "info", "--query=property", "--name="+device],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.returncode == 0:
+            props = {}
+            for line in r.stdout.splitlines():
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    props[k] = v
+            # Primary: USB serial number
+            serial = props.get('ID_SERIAL_SHORT', '')
+            if serial:
+                return serial
+            # Fallback: VID:PID
+            vid = props.get('ID_VENDOR_ID', '')
+            pid = props.get('ID_MODEL_ID', '')
+            if vid and pid:
+                return f'{vid}:{pid}'
+            # Last resort: devpath
+            devpath = props.get('DEVPATH', '')
+            if devpath:
+                return devpath
+    except Exception:
+        pass
+    # Ultimate fallback: device path itself
+    return device
+
+# ─── CALIBRATION STATUS & CAMERA CHANGE DETECTION ────────────────────────────
+CALIB_STATUS_FILE = Path("/opt/spotbot/config/calib_status.json")
+
+def get_calibration_status() -> dict:
+    """Retourne le statut de calibration pour chaque caméra.
+    Format: {1: {"calibrated": True, "fingerprint": "ABC123"}, 2: {...}}
+    """
+    default = {1: {"calibrated": False, "fingerprint": None}, 2: {"calibrated": False, "fingerprint": None}}
+    if CALIB_STATUS_FILE.exists():
+        try:
+            data = json.loads(CALIB_STATUS_FILE.read_text())
+            for cam_id in [1, 2]:
+                if str(cam_id) in data:
+                    default[cam_id] = data[str(cam_id)]
+                elif cam_id in data:
+                    default[cam_id] = data[cam_id]
+        except Exception:
+            pass
+    return default
+
+def save_calibration_status(cam_id: int, calibrated: bool, fingerprint: str = None):
+    """Sauvegarde le statut de calibration pour une caméra."""
+    status = get_calibration_status()
+    status[cam_id] = {"calibrated": calibrated, "fingerprint": fingerprint}
+    try:
+        CALIB_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CALIB_STATUS_FILE.write_text(json.dumps({str(k): v for k, v in status.items()}))
+    except Exception as e:
+        print(f"[Agent] Erreur sauvegarde calib_status: {e}")
+
+def detect_camera_change() -> dict:
+    """Détecte si une caméra a été changée (fingerprint différent).
+    Retourne {cam_id: changed_bool, ...} et invalide la calibration si changée.
+    """
+    status = get_calibration_status()
+    mapping = get_camera_devices()
+    result = {}
+    for cam_id in [1, 2]:
+        dev_info = mapping.get(cam_id, {})
+        current_fp = dev_info.get("fingerprint") if isinstance(dev_info, dict) else None
+        saved_fp = status.get(cam_id, {}).get("fingerprint")
+        changed = False
+        if current_fp and saved_fp and current_fp != saved_fp:
+            changed = True
+            # Invalider la calibration
+            save_calibration_status(cam_id, False, current_fp)
+            print(f"[Agent] ⚠️ Caméra {cam_id} changée (fingerprint: {saved_fp} → {current_fp}). Calibration invalidée.")
+        elif current_fp and not saved_fp:
+            # Première fois qu'on voit cette caméra — enregistrer le fingerprint
+            save_calibration_status(cam_id, status.get(cam_id, {}).get("calibrated", False), current_fp)
+        result[cam_id] = changed
+    return result
+
+def get_active_video_devices() -> list[str]:
+    """Return sorted list of /dev/videoN paths bound to currently-plugged USB cameras.
+
+    Reads /dev/v4l/by-id/* which only contains entries for cameras the kernel
+    actually bound to a v4l2 driver. Resolves each symlink to its target
+    /dev/videoN and dedupes. Fallback to /dev/video0 + /dev/video2 so the dashboard
+    has something to show when by-id is empty (cold boot before cameras finish).
+    """
+    fallback = ['/dev/video0', '/dev/video2']
+    out = set()
+    try:
+        if os.path.isdir('/dev/v4l/by-id'):
+            for entry in os.listdir('/dev/v4l/by-id'):
+                if not entry.startswith('usb-'):
+                    continue
+                # Exclude metadata and secondary capture endpoints
+                if 'index1' in entry or 'metadata' in entry:
+                    continue
+                link = os.path.join('/dev/v4l/by-id', entry)
+                try:
+                    real = os.path.realpath(link)
+                    if real.startswith('/dev/video'):
+                        out.add(real)
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    return sorted(out) if out else sorted(set(fallback))
+
 def check_camera_connected(cam_id: int) -> bool:
-    """Vérifie si la caméra physique est connectée au système."""
+    """Vérifie si une caméra V4L2 est connectée au système.
+
+    Ordre de vérification:
+    1. Le mapping du cam_id (chemin /dev/video*).
+    2. Fallback: /dev/v4l/by-id/ contient une entrée USB V4L2
+       (filtre les encodeurs hardware internes du Pi type bcm2835-isp).
+       Cela évite un false-negative quand le mapping est obsolète
+       après reboot ou renumérotation USB (certains drivers UVC ne
+       créent le device node quès qu´un userspace le bind).
+    """
     mapping = get_camera_devices()
     dev = mapping.get(cam_id)
-    if dev:
-        return os.path.exists(dev)
+    if dev and isinstance(dev, dict):
+        dev = dev.get("device", dev)
+    if dev and os.path.exists(dev):
+        return True
+    # Fallback: au moins une caméra USB V4L2 visible pour le kernel
+    by_id_dir = "/dev/v4l/by-id"
+    if os.path.isdir(by_id_dir):
+        try:
+            usb_count = sum(1 for n in os.listdir(by_id_dir) if n.startswith("usb-"))
+            # Ne retourner True que si l index du cam est couvert par le nombre
+            # de cams USB. Evite de signaler cam2=true quand une seule cam est branchee.
+            if cam_id <= usb_count:
+                return True
+        except OSError:
+            pass
     return False
+
+
 
 def is_arduino_connected() -> bool:
     """Vérifie si le microcontrôleur Arduino Mega est physiquement connecté."""
@@ -150,92 +310,6 @@ def is_arduino_connected() -> bool:
             return True
     return False
 
-camera_processes = {
-    1: None,
-    2: None
-}
-
-def is_device_free(device: str) -> bool:
-    """Vérifie qu'un périphérique vidéo existe et n'est pas verrouillé."""
-    if not os.path.exists(device):
-        return False
-    try:
-        result = subprocess.run(["fuser", device], capture_output=True, text=True)
-        return result.returncode != 0
-    except Exception:
-        return True
-
-def start_camera_stream(cam_id: int):
-    proc = camera_processes.get(cam_id)
-    if proc is not None:
-        if proc.poll() is None:
-            return
-        else:
-            try:
-                proc.wait()
-            except Exception:
-                pass
-            camera_processes[cam_id] = None
-
-    mapping = get_camera_devices()
-    device = mapping.get(cam_id)
-    if not device:
-        print(f"[Agent] Aucun device mappé pour Cam {cam_id}.")
-        return
-
-    if not os.path.exists(device):
-        print(f"[Agent] Cam {cam_id}: {device} inexistant.")
-        return
-
-    if not is_device_free(device):
-        print(f"[Agent] Cam {cam_id}: {device} indisponible (verrouillé par ROS).")
-        return
-
-    rtsp_url = f"rtsp://ha.arthonetwork.fr:48554/robot/cam{cam_id}"
-
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-f", "v4l2",
-        "-input_format", "mjpeg",
-        "-video_size", "640x480",
-        "-framerate", "10",
-        "-i", device,
-        "-vcodec", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-profile:v", "baseline",
-        "-level", "3.0",
-        "-crf", "32",
-        "-threads", "2",
-        "-pix_fmt", "yuv420p",
-        "-g", "10",
-        "-bf", "0",
-        "-f", "rtsp",
-        "-rtsp_transport", "tcp",
-        rtsp_url
-    ]
-
-    try:
-        print(f"[Agent] Démarrage du flux RTSP Cam {cam_id} sur {device}...")
-        camera_processes[cam_id] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[Agent] Erreur démarrage Cam {cam_id} : {e}")
-
-def stop_camera_stream(cam_id: int):
-    proc = camera_processes.get(cam_id)
-    if proc is not None:
-        print(f"[Agent] Arrêt du flux RTSP pour Cam {cam_id}...")
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        camera_processes[cam_id] = None
 
 # ─── ARDUINO FIRMWARE ACTIONS ─────────────────────────────────────────────────
 
@@ -674,6 +748,10 @@ def fetch_camera_cals_from_gateway():
             with open(path, "w", encoding="utf-8") as f:
                 f.write(yaml1)
         print(f"[Agent] Calibration caméra 1 récupérée → camera_calibration.yaml + camera_stereo_left.yaml")
+        # Marquer caméra 1 comme calibrée
+        mapping = get_camera_devices()
+        fp = mapping.get(1, {}).get("fingerprint") if isinstance(mapping.get(1), dict) else None
+        save_calibration_status(1, True, fp)
     except Exception as e:
         print(f"[Agent] Impossible de récupérer la calibration caméra 1: {e}")
         print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
@@ -694,6 +772,10 @@ def fetch_camera_cals_from_gateway():
         with open(CAMERA_CALIB_RIGHT_FILE, "w", encoding="utf-8") as f:
             f.write(yaml2)
         print(f"[Agent] Calibration caméra 2 récupérée → camera_stereo_right.yaml")
+        # Marquer caméra 2 comme calibrée
+        mapping = get_camera_devices()
+        fp = mapping.get(2, {}).get("fingerprint") if isinstance(mapping.get(2), dict) else None
+        save_calibration_status(2, True, fp)
     except Exception as e:
         print(f"[Agent] Impossible de récupérer la calibration caméra 2: {e}")
         print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
@@ -1045,7 +1127,10 @@ def update_status_loop():
                     "spotbot_service": "active" if active else "inactive",
                     "cam1_connected": check_camera_connected(1),
                     "cam2_connected": check_camera_connected(2),
-                    "arduino_connected": get_arduino_stable_state()
+                    "arduino_connected": get_arduino_stable_state(),
+                    "calibration_status": get_calibration_status(),
+                    "camera_changed": detect_camera_change(),
+                    "available_video_devices": get_active_video_devices()
                 },
                 "ai_state": {
                     "tts": tts_target,
@@ -1119,6 +1204,27 @@ def start_websocket_client():
                             global latest_telemetry
                             if latest_telemetry:
                                 try:
+                                    # Inject fresh sensor booleans (overrides stale ROS-only payload so dashboard sees live state).
+                                    # Probes run in worker threads so blocking V4L syscalls do NOT stall the asyncio loop.
+                                    # return_exceptions=True → a single USB hiccup kills one probe only, the other probe still publishes.
+                                    # No spread of prev_sensors: keeps us from resurrecting stale non-camera fields set by ros2.
+                                    try:
+                                        cam1_res, cam2_res = await asyncio.gather(
+                                            asyncio.to_thread(check_camera_connected, 1),
+                                            asyncio.to_thread(check_camera_connected, 2),
+                                            return_exceptions=True,
+                                        )
+                                        cam1 = cam1_res if not isinstance(cam1_res, BaseException) else False
+                                        cam2 = cam2_res if not isinstance(cam2_res, BaseException) else False
+                                    except Exception as probe_err:
+                                        print(f"[Agent - WS Send] Probes cam échouées: {probe_err}")
+                                        cam1 = False
+                                        cam2 = False
+                                    latest_telemetry["sensors"] = {
+                                        "cam1_connected": bool(cam1),
+                                        "cam2_connected": bool(cam2),
+                                    }
+
                                     # Print debug once in a while
                                     if int(time.time()) % 10 == 0:
                                         print(f"[Agent - WS Send] Envoi télémétrie périodique: {list(latest_telemetry.keys())}")
@@ -1156,23 +1262,77 @@ def start_websocket_client():
                                     
                                 elif msg_type == "start_camera":
                                     cam = data.get("camera", 1)
-                                    if is_spotbot_service_active():
-                                        if ros2_process and ros2_process.stdin:
-                                            ros2_process.stdin.write(json.dumps(data) + "\n")
-                                            ros2_process.stdin.flush()
-                                            print(f"[Agent] Start camera {cam} déléguée au ros2_listener (ROS actif).")
-                                    else:
-                                        start_camera_stream(cam)
+                                    v_slam = data.get("v_slam", False)
+                                    # V-SLAM gatekeeping: vérifier calibration
+                                    if v_slam:
+                                        cal_status = get_calibration_status()
+                                        cam_cal = cal_status.get(cam, {})
+                                        if not cam_cal.get("calibrated", False):
+                                            await ws.send(json.dumps({
+                                                "type": "vslam_blocked",
+                                                "camera": cam,
+                                                "reason": "Calibration requise avant V-SLAM. Calibrez la caméra dans Arduino & Calib."
+                                            }))
+                                            print(f"[Agent] ⚠️ V-SLAM bloqué pour caméra {cam}: calibration invalide.")
+                                            continue
+                                    if ros2_process and ros2_process.stdin:
+                                        ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        ros2_process.stdin.flush()
+                                        print(f"[Agent] Start camera {cam} déléguée au ros2_listener.")
                                     
                                 elif msg_type == "stop_camera":
                                     cam = data.get("camera", 1)
-                                    if is_spotbot_service_active():
-                                        if ros2_process and ros2_process.stdin:
-                                            ros2_process.stdin.write(json.dumps(data) + "\n")
-                                            ros2_process.stdin.flush()
-                                            print(f"[Agent] Stop camera {cam} déléguée au ros2_listener (ROS actif).")
-                                    else:
-                                        stop_camera_stream(cam)
+                                    if ros2_process and ros2_process.stdin:
+                                        ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        ros2_process.stdin.flush()
+                                        print(f"[Agent] Stop camera {cam} déléguée au ros2_listener.")
+                                elif msg_type == "query_camera_resolutions":
+                                    cam = data.get("camera", 1)
+                                    devices = get_camera_devices()
+                                    dev = devices.get(cam)
+                                    resolutions = []
+                                    if dev and os.path.exists(dev):
+                                        try:
+                                            result = subprocess.run(
+                                                ["v4l2-ctl", "--list-formats-ext", "-d", dev],
+                                                capture_output=True, text=True, timeout=5
+                                            )
+                                            if result.returncode == 0:
+                                                seen = set()
+                                                for line in result.stdout.split(chr(10)):
+                                                    m = re.search(r'Size: Discrete (\d+)x(\d+)', line)
+                                                    if m:
+                                                        w, h = m.groups()
+                                                        fmt = f'{w}x{h}'
+                                                        if fmt not in seen:
+                                                            seen.add(fmt)
+                                                            resolutions.append(fmt)
+                                            if not resolutions:
+                                                try:
+                                                    r2 = subprocess.run(
+                                                        ["ffprobe", "-f", "v4l2", "-list_formats", "all", "-i", dev],
+                                                        capture_output=True, text=True, timeout=5
+                                                    )
+                                                    seen = set()
+                                                    for line in r2.stderr.split(chr(10)):
+                                                        m = re.search(r'(\d+)x(\d+)', line)
+                                                        if m:
+                                                            w, h = m.groups()
+                                                            fmt = f'{w}x{h}'
+                                                            if fmt not in seen:
+                                                                seen.add(fmt)
+                                                                resolutions.append(fmt)
+                                                except:
+                                                    pass
+                                        except Exception as e:
+                                            print(f'[Agent] Erreur détection résolutions cam {cam}: {e}')
+                                    if not resolutions:
+                                        resolutions = ["640x480", "1280x720", "1920x1080", "640x360", "320x240"]
+                                    await ws.send(json.dumps({
+                                        "type": "camera_resolutions",
+                                        "camera": cam,
+                                        "resolutions": resolutions
+                                    }))
                                     
                                 elif msg_type == "motor_calibration":
                                     print("[Agent] Commande de calibration reçue !")

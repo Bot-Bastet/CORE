@@ -26,7 +26,7 @@ def generate_launch_description():
 
     bridge_node = Node(
         package='spotbot_arduino_bridge',
-        executable='arduino_bridge_node.py',
+        executable='arduino_bridge_node',
         name='arduino_bridge',
         parameters=[{
             'port':          LaunchConfiguration('port'),

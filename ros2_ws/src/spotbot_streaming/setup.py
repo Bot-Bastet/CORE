@@ -16,7 +16,7 @@ setup(
     zip_safe=True,
     entry_points={
         'console_scripts': [
-            'camera_stream_node  = spotbot_streaming.camera_stream_node:main',
+            'streaming_engine     = spotbot_streaming.streaming_engine:main',
             'wifi_watchdog_node  = spotbot_streaming.wifi_watchdog_node:main',
         ],
     },

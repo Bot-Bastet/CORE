@@ -56,8 +56,8 @@ DISCOVERY_TIMEOUT = 10.0      # secondes à attendre la réponse du PC
 VIDEO_PORT_BASE   = 5000      # cam0 = 5000, cam1 = 5002
 
 # Serveur RTSP distant (fallback) — modifier selon votre infra
-REMOTE_RTSP_HOST  = "82.66.150.66"
-REMOTE_RTSP_PORT  = 8554
+REMOTE_RTSP_HOST  = "ha.arthonetwork.fr"
+REMOTE_RTSP_PORT  = 48554
 
 # Résolution et FPS par caméra
 STREAM_WIDTH   = 640
@@ -180,7 +180,7 @@ def build_ffmpeg_rtsp_cmd(device: str, cam_id: int = 0,
         cam_id:   0 ou 1 (pour distinguer les flux stéréo)
         bind_ip:  IP locale à forcer pour le routing (Alfa)
     """
-    stream_name  = f"cam{cam_id}"
+    stream_name  = f"robot/cam{cam_id}"
     rtsp_url     = f"rtsp://{REMOTE_RTSP_HOST}:{REMOTE_RTSP_PORT}/{stream_name}"
     bind_opt     = f"-bind_address {bind_ip}" if bind_ip else ""
 

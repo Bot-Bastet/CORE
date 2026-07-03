@@ -72,6 +72,7 @@ if $HAS_LEFT; then
     if [ "$CAM_MODE" = "mono" ]; then
         # Mono → publish to /camera/image_raw (matches ORB-SLAM3 mono expectations)
         ros2 run usb_cam usb_cam_node_exe --ros-args \
+          -p use_intra_process_comms:=true \
           -r __node:=usb_cam1 \
           -p video_device:="$CAM_LEFT" -p pixel_format:=yuyv2rgb \
           -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
@@ -83,6 +84,7 @@ if $HAS_LEFT; then
     else
         # Stereo → left publishes to /camera/left/image_raw
         ros2 run usb_cam usb_cam_node_exe --ros-args \
+          -p use_intra_process_comms:=true \
           -r __node:=usb_cam1 \
           -p video_device:="$CAM_LEFT" -p pixel_format:=yuyv2rgb \
           -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
@@ -102,6 +104,7 @@ if $HAS_RIGHT; then
 
     # Right camera → /camera/right/image_raw (with stereo calibration)
     ros2 run usb_cam usb_cam_node_exe --ros-args \
+          -p use_intra_process_comms:=true \
       -r __node:=usb_cam2 \
       -p video_device:="$CAM_RIGHT" -p pixel_format:=yuyv2rgb \
       -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
@@ -177,6 +180,12 @@ sleep 2
 # ============================================
 ros2 run rosboard rosboard_node >> $LOG/rosboard.log 2>&1 &
 echo "[SpotBot] ROSboard OK (:8888)" | tee -a $LOG/startup.log
+
+# ============================================
+# 7. Streaming Engine (dual-pipeline: VSLAM IPC + Gateway WebRTC)
+# ============================================
+ros2 run spotbot_streaming streaming_engine >> $LOG/streaming.log 2>&1 &
+echo "[SpotBot] Streaming Engine OK" | tee -a $LOG/startup.log
 
 echo "[SpotBot] $(date) — Ready! (mode=$CAM_MODE, cameras=$CAM_COUNT)" | tee -a $LOG/startup.log
 
