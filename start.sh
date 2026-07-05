@@ -159,6 +159,10 @@ else
 fi
 
 if [ -n "$ARDUINO_PORT" ]; then
+    # Kill any existing bridge to prevent serial port contention and fragmented reads
+    pkill -f arduino_bridge_node 2>/dev/null || true
+    fuser -k "$ARDUINO_PORT" 2>/dev/null || true
+    sleep 2
     ros2 run spotbot_arduino_bridge arduino_bridge_node --ros-args \
       -p baudrate:=500000 -p auto_flash:=false \
       >> $LOG/arduino.log 2>&1 &
