@@ -233,6 +233,41 @@ def detect_camera_change() -> dict:
         result[cam_id] = changed
     return result
 
+def _list_physical_usb_video_devices() -> list:
+    """Return sorted /dev/videoN paths for physically-plugged USB UVC cameras.
+
+    Reads /dev/v4l/by-id/ which only contains entries for cameras the kernel
+    actually bound to a v4l2 driver. EXCLUDES UVC metadata endpoints
+    ('video-index1', 'metadata' in name) -- those are NOT independent cameras:
+    a single physical USB UVC camera creates 2 by-id entries (capture + metadata)
+    and would otherwise be counted twice, causing the dashboard to falsely report
+    2 cameras when only 1 is plugged.
+
+    Shared by check_camera_connected() and get_active_video_devices() -- DO NOT
+    diverge the filter rule between callers.
+    """
+    out = set()
+    by_id_dir = "/dev/v4l/by-id"
+    if not os.path.isdir(by_id_dir):
+        return []
+    try:
+        for entry in os.listdir(by_id_dir):
+            if not entry.startswith("usb-"):
+                continue
+            if "index1" in entry or "metadata" in entry:
+                continue
+            link = os.path.join(by_id_dir, entry)
+            try:
+                real = os.path.realpath(link)
+                if real.startswith("/dev/video"):
+                    out.add(real)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return sorted(out)
+
+
 def get_active_video_devices() -> list[str]:
     """Return sorted list of /dev/videoN paths bound to currently-plugged USB cameras.
 
@@ -241,26 +276,8 @@ def get_active_video_devices() -> list[str]:
     /dev/videoN and dedupes. Fallback to /dev/video0 + /dev/video2 so the dashboard
     has something to show when by-id is empty (cold boot before cameras finish).
     """
-    fallback = ['/dev/video0', '/dev/video2']
-    out = set()
-    try:
-        if os.path.isdir('/dev/v4l/by-id'):
-            for entry in os.listdir('/dev/v4l/by-id'):
-                if not entry.startswith('usb-'):
-                    continue
-                # Exclude metadata and secondary capture endpoints
-                if 'index1' in entry or 'metadata' in entry:
-                    continue
-                link = os.path.join('/dev/v4l/by-id', entry)
-                try:
-                    real = os.path.realpath(link)
-                    if real.startswith('/dev/video'):
-                        out.add(real)
-                except OSError:
-                    continue
-    except Exception:
-        pass
-    return sorted(out) if out else sorted(set(fallback))
+    devices = _list_physical_usb_video_devices()
+    return devices if devices else ['/dev/video0', '/dev/video2']
 
 def check_camera_connected(cam_id: int) -> bool:
     """Vérifie si une caméra V4L2 est connectée au système.
