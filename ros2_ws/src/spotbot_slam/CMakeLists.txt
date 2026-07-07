@@ -3,7 +3,7 @@ project(spotbot_slam)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY launch config params
+install(DIRECTORY launch params
   DESTINATION share/${PROJECT_NAME}/
 )
 
