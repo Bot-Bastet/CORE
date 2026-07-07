@@ -70,17 +70,21 @@ if $HAS_LEFT; then
     sleep 1
 
     if [ "$CAM_MODE" = "mono" ]; then
-        # Mono → publish to /camera/image_raw (matches ORB-SLAM3 mono expectations)
+        # Mono → publish to /camera/left/image_raw (matches streaming_engine.py
+        # which hardcodes the cam0 topic to /camera/left/image_raw even in mono
+        # mode, since it only sees one camera and assigns it to cam index 0).
+        # Using /camera/image_raw here would leave the engine subscribed to a
+        # topic that no node publishes to, so ffmpeg never spawns.
         ros2 run usb_cam usb_cam_node_exe --ros-args \
           -p use_intra_process_comms:=true \
           -r __node:=usb_cam1 \
           -p video_device:="$CAM_LEFT" -p pixel_format:=yuyv2rgb \
           -p image_width:=640 -p image_height:=480 -p framerate:=10.0 \
-          -p camera_info_url:=file:///opt/spotbot/config/camera_calibration.yaml \
-          -p camera_name:=usb_cam1 -p frame_id:=camera_link \
-          -r image_raw:=/camera/image_raw -r camera_info:=/camera/camera_info \
+          -p camera_info_url:=file:///opt/spotbot/config/camera_stereo_left.yaml \
+          -p camera_name:=usb_cam_left -p frame_id:=camera_link \
+          -r image_raw:=/camera/left/image_raw -r camera_info:=/camera/left/camera_info \
           >> $LOG/camera1.log 2>&1 &
-        echo "[SpotBot] Camera OK ($CAM_LEFT → /camera/image_raw [mono])" | tee -a $LOG/startup.log
+        echo "[SpotBot] Camera OK ($CAM_LEFT → /camera/left/image_raw [mono])" | tee -a $LOG/startup.log
     else
         # Stereo → left publishes to /camera/left/image_raw
         ros2 run usb_cam usb_cam_node_exe --ros-args \

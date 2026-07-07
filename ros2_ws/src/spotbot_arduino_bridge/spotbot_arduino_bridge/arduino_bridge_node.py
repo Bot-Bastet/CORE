@@ -91,6 +91,11 @@ class ArduinoBridgeNode(Node):
             self._calib_callback, 10
         )
 
+        # FIX NATIF (v2) : la calibration IMU est désormais gérée 100% côté Arduino
+        # (EEPROM + q_offset^-1 dans readBNO085), avec persistance. Le bridge ROS
+        # ne maintient plus d'état de calibration et se contente de relayer les
+        # quaternions déjà calibrés que l'Arduino publie sur le port série.
+
         # Charger les offsets existants
         self._offsets = [0.0] * 12
         try:
@@ -107,8 +112,12 @@ class ArduinoBridgeNode(Node):
         self._connected = False
         self._last_retry = 0.0
 
+        # (FIX NATIF v2 : gestionnaire de calibration IMU retiré — l'Arduino gère
+        # désormais la persistance et le calcul d'offset dans son firmware.)
+
         # Timer principal de lecture
         rate = self.get_parameter('publish_rate').value
+        # (Suppression des hooks de calibration IMU locale : tout est dans le firmware.)
         self._timer = self.create_timer(1.0 / rate, self._spin_serial)
         
         # Timer de heartbeat (1 Hz) pour le watchdog
@@ -116,6 +125,15 @@ class ArduinoBridgeNode(Node):
 
         self.get_logger().info('Arduino Bridge Node demarré. Auto-detection du port...')
         self._try_connect()
+
+    # ------------------------------------------------------------------
+    # FIX NATIF v2 : suppression des hooks de calibration IMU locale. Le
+    # firmware Arduino (EEPROM + q_offset^-1) fournit un quaternion deja
+    # calibre sur le port serie ; le bridge se contente de le publier tel quel
+    # sur /imu/data et /imu/data_raw (les deux portent maintenant la meme
+    # valeur calibree — la distinction _raw est documentee comme « avant
+    # swap X-180 firmware + calibration offset »).
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Connexion / auto-detection
@@ -267,12 +285,20 @@ class ArduinoBridgeNode(Node):
             self._save_arduino_version(data['version'])
 
     def _publish_imu_bno085(self, imu_raw: dict):
-        """BNO085 : quaternion fused + accéleration linéaire + gyro -> /imu/data et /imu/data_raw."""
+        """BNO085 : quaternion fused + accéleration linéaire + gyro.
+
+        FIX NATIF v2 : la calibration est désormais appliquée dans le firmware
+        Arduino (q_offset EEPROM) AVANT la sérialisation JSON. Le bridge ne fait
+        plus que publier tels quels les quaternions reçus sur /imu/data et
+        /imu/data_raw (les deux topics reçoivent la meme valeur calibree).
+        Pour les consommateurs qui voulaient du « vraiment brut » (avant swap
+        X-180 firmware + offset utilisateur), ils doivent lire directement le
+        port série de l'Arduino.
+        """
         msg = Imu()
         msg.header.stamp    = self.get_clock().now().to_msg()
         msg.header.frame_id = self.IMU_FRAME
 
-        # Quaternion (encodé * 10000 côté Arduino)
         qw = imu_raw.get('qw', 10000) / 10000.0
         qx = imu_raw.get('qx', 0)    / 10000.0
         qy = imu_raw.get('qy', 0)    / 10000.0
@@ -285,27 +311,22 @@ class ArduinoBridgeNode(Node):
         msg.orientation.y = qy
         msg.orientation.z = qz
 
-        # Covariance selon niveau de calibration BNO085 (0-3)
         calib = imu_raw.get('calib', 0)
         oc = {3: 0.0001, 2: 0.001, 1: 0.01, 0: 0.1}.get(calib, 0.01)
         msg.orientation_covariance = [oc, 0, 0, 0, oc, 0, 0, 0, oc]
 
-        # Accélération linéaire (gravité soustraite par BNO085, encodée cm/s² * 100)
         msg.linear_acceleration.x = imu_raw.get('lax', 0) / 100.0
         msg.linear_acceleration.y = imu_raw.get('lay', 0) / 100.0
         msg.linear_acceleration.z = imu_raw.get('laz', 0) / 100.0
-        cov_a = [0.005, 0, 0, 0, 0.005, 0, 0, 0, 0.005]
-        msg.linear_acceleration_covariance = cov_a
+        msg.linear_acceleration_covariance = [0.005, 0, 0, 0, 0.005, 0, 0, 0, 0.005]
 
-        # Gyroscope (encodé mrad/s * 1000)
         msg.angular_velocity.x = imu_raw.get('gx', 0) / 1000.0
         msg.angular_velocity.y = imu_raw.get('gy', 0) / 1000.0
         msg.angular_velocity.z = imu_raw.get('gz', 0) / 1000.0
-        cov_g = [0.0003, 0, 0, 0, 0.0003, 0, 0, 0, 0.0003]
-        msg.angular_velocity_covariance = cov_g
+        msg.angular_velocity_covariance = [0.0003, 0, 0, 0, 0.0003, 0, 0, 0, 0.0003]
 
-        self._imu_pub.publish(msg)      # /imu/data     (orientation valide)
-        self._imu_raw_pub.publish(msg)  # /imu/data_raw (compatibilité rtabmap)
+        self._imu_pub.publish(msg)      # /imu/data     (orientation deja calibree firmware-side)
+        self._imu_raw_pub.publish(msg)  # /imu/data_raw (meme valeur, conservée pour compat SLAM)
 
     def _publish_sonar(self, sonar_raw: dict):
         """HC-SR04 : distance en mètres + alerte obstacle."""

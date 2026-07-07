@@ -9,7 +9,11 @@ Health: publishes /streaming/status every 2s with discovered cameras + active st
 Auto-detection: /dev/v4l/by-id/ at startup, maps /dev/video* → ROS Image topics.
 """
 import glob, json, os, re, subprocess
+import signal
+import sys
 import rclpy
+import rclpy.executors
+import rclpy.logging
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -46,8 +50,8 @@ def discover_cameras() -> dict[int, dict]:
         {cam_index: {device: '/dev/videoX', name: 'Human-readable', topic: '...'}}
 
     ROS2 topic convention (matches usb_cam stereo launch in start.sh):
-      - camera 0 (left)  → /camera/left/image_raw
-      - camera 1 (right) → /camera/right/image_raw
+      - camera 1 (left)  → /camera/left/image_raw
+      - camera 2 (right) → /camera/right/image_raw
 
     Returns empty dict if no cameras found.
     """
@@ -95,7 +99,8 @@ def discover_cameras() -> dict[int, dict]:
                 _, dev = camera_groups[base]
                 name = base.replace('_', ' ')
                 topic = '/camera/left/image_raw' if i == 0 else '/camera/right/image_raw'
-                cameras[i] = {
+                # 1-based key: dashboard + agent.ws use cam_id 1/2.
+                cameras[i + 1] = {
                     'device': dev,
                     'name': name,
                     'topic': topic,
@@ -125,11 +130,12 @@ def discover_cameras() -> dict[int, dict]:
             if match and current_name:
                 dev_path = match.group(0)
                 if _is_capture_device(dev_path):
-                    cam_idx = len(cameras)
-                    if cam_idx >= 2:
+                    # 1-based key: dashboard + agent.ws use cam_id 1/2.
+                    cam_id = len(cameras) + 1
+                    if cam_id > 2:
                         break
-                    topic = '/camera/image_raw' if cam_idx == 0 else '/camera/right/image_raw'
-                    cameras[cam_idx] = {
+                    topic = '/camera/left/image_raw' if cam_id == 1 else '/camera/right/image_raw'
+                    cameras[cam_id] = {
                         'device': dev_path,
                         'name': current_name.strip(),
                         'topic': topic,
@@ -139,11 +145,12 @@ def discover_cameras() -> dict[int, dict]:
         devs = sorted(glob.glob('/dev/video*'))
         for d in devs:
             if re.search(r'/dev/video\d+$', d) and _is_capture_device(d):
-                cam_idx = len(cameras)
-                if cam_idx >= 2:
+                # 1-based key: dashboard + agent.ws use cam_id 1/2.
+                cam_id = len(cameras) + 1
+                if cam_id > 2:
                     break
-                topic = '/camera/image_raw' if cam_idx == 0 else '/camera/right/image_raw'
-                cameras[cam_idx] = {
+                topic = '/camera/left/image_raw' if cam_id == 1 else '/camera/right/image_raw'
+                cameras[cam_id] = {
                     'device': d,
                     'name': d,
                     'topic': topic,
@@ -309,6 +316,25 @@ class StreamingEngine(Node):
                 except Exception:
                     pass
 
+    def _cleanup_all_procs(self):
+        """Terminate every running ffmpeg subprocess. Called from the SIGTERM
+        handler in main() so child processes get a graceful exit before
+        systemd's cgroup reaper SIGKILLs them after TimeoutStopSec."""
+        for cam, proc in list(self.procs.items()):
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self.procs.clear()
+
     def _start_ffmpeg(self, cam: int, encoding: str, width: int, height: int):
         # Map ROS Image encoding to ffmpeg pixel format
         pix_fmt = ENCODING_MAP.get(encoding, 'rgb24')
@@ -333,8 +359,47 @@ class StreamingEngine(Node):
 
 
 def main(args=None):
+    # Module-level logger: works even if StreamingEngine() construction fails,
+    # so shutdown events are always observable.
+    mod_log = rclpy.logging.get_logger('streaming_engine')
     rclpy.init(args=args)
-    rclpy.spin(StreamingEngine())
+    try:
+        node = StreamingEngine()
+    except Exception as e:
+        mod_log.error(f"StreamingEngine construction failed: {e}")
+        raise
+    log = node.get_logger()
+
+    # SIGTERM handler: clean up ffmpeg subprocesses before exiting, so they
+    # don't get SIGKILL'd by the cgroup reaper after TimeoutStopSec=20.
+    def _on_sigterm(signum, frame):
+        log.info("SIGTERM received — cleaning up ffmpeg subprocesses")
+        try:
+            node._cleanup_all_procs()
+        except Exception as e:
+            log.warning(f"SIGTERM cleanup error (ignored): {e}")
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        log.info("KeyboardInterrupt — shutting down")
+        node._cleanup_all_procs()
+    except rclpy.executors.ExternalShutdownException:
+        # SIGTERM received (rclpy's default handler converts it to rclpy.shutdown(),
+        # which raises this from inside spin). With KillMode=mixed + Restart=always
+        # in spotbot.service, systemd will relaunch us cleanly. The custom SIGTERM
+        # handler above already cleaned up ffmpeg.
+        log.info("External shutdown — exiting cleanly")
+        node._cleanup_all_procs()
+    finally:
+        # rclpy.shutdown() can raise a wide variety of errors after a signal:
+        # RuntimeError, RCLError, or even a torn-down pybind11 handle. Catch broad.
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

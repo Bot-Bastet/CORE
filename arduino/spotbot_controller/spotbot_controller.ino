@@ -33,12 +33,53 @@
 #include <Arduino.h>
 #include <Servo.h>
 #include <Wire.h>
+#include <EEPROM.h>          // FIX NATIF: persistance de la calibration IMU en EEPROM
 #include <SparkFun_BNO08x_Arduino_Library.h>
+
+// ============================================================
+// FIX NATIF : Calibration IMU persistante en EEPROM Arduino
+// ============================================================
+// Layout EEPROM Mega2560 (22 octets à l'adresse 0).
+// IMPORTANT : `crc` est en DERNIER (packed) — comme ça `offsetof(EepromImuCalib, crc)`
+// donne 20 (sizeof de magic + 4 floats), donc le CRC couvre magic + q_offset ensemble,
+// pas juste le magic. Sinon une corruption des floats passerait silencieusement.
+//   Adr 0  ..3   : magic uint32_t  = BNO085_CALIB_MAGIC  (detecte "calibree" vs usine)
+//   Adr 4  ..19  : q_offset_wxyz  float[4]  (pose post-X180 capturee lors de reset_imu)
+//   Adr 20 ..21  : crc   uint16_t  CRC16-CCITT sur magic+q_offset
+// ============================================================
+#define BNO085_CALIB_MAGIC 0xCAFEBABEul
+#define EEPROM_CALIB_ADDR   0
+
+// FIX NATIF v4 : on retire __attribute__((packed)) — sur AVR gcc, le qualifier
+// packed + EEPROM.put() (template avec reference) peut declencher un bug
+// silencieux du compilateur qui ecrit partiellement les 22 octets vers
+// l'EEPROM. On evite completement la voie templatee en faisant des
+// EEPROM.write() octet par octet, avec un buffer RAM uint8_t[22] dont on
+// calcule le CRC16 a la fin. Aussi v4 utilise un signed-magic 0xCAFEBABE
+// inversé (plus distinctif que BEEFCAFE pour detecter des coupures) :
+//   magic bytes little-endian EF BE CA FE → uint32 = 0xCAFEBABE.
+struct EepromImuCalib {
+    uint32_t magic;
+    float qw, qx, qy, qz;   // q_offset persistant (conjugue de la pose post-X180 capturee)
+    uint16_t crc;            // CRC16-CCITT sur magic + q_offset
+};
+static_assert(sizeof(EepromImuCalib) == 22, "EEPROM layout doit faire 22 octets");
+
+static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.7"
+#define SKETCH_VERSION    "v0.2.18"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       500000
 #define IMU_PUBLISH_MS    50      // 20 Hz
@@ -84,11 +125,21 @@ unsigned long last_cmd_ms  = 0;
 unsigned long last_imu_ms  = 0;
 bool          watchdog_mode = false;
 bool          servos_enabled = false;  // servos désactivés jusqu'à la 1ère commande
+bool          flag_capture_initial_pose = false;  // FIX NATIF: armé par resetBNO085(), consommé par readBNO085()
+
+// FIX NATIF v6 : save distribué sur 22 loop() iterations (1 octet / itération).
+// Chaque EEPROM.write(~3.3ms) est entrecoupé d'une boucle entiere
+// (readSerial -> applyServos -> readBNO085 -> publishAll) donc le chip n'est JAMAIS
+// bloqué >3.3ms consecutifs, ce qui etait la cause des coupures brownout
+// mi-écriture qui laissaient les octets 8+ a 0xFF.
+uint8_t       save_buf[22];
+volatile uint8_t save_index = 0;  // 0 = inactif, 1..22 = octet en cours, >22 = terminé
 
 BNO08x bno;
 
 struct BnoData {
     float qw = 1, qx = 0, qy = 0, qz = 0;
+    float q_offset_w = 1, q_offset_x = 0, q_offset_y = 0, q_offset_z = 0;  // FIX NATIF
     float lax = 0, lay = 0, laz = 0;
     float gx = 0,  gy = 0,  gz = 0;
     uint8_t calib = 0;
@@ -141,6 +192,7 @@ void setup() {
         bno.enableRotationVector(20);
         bno.enableLinearAccelerometer(20);
         bno.enableGyro(20);
+        load_calibration_from_eeprom();  // FIX NATIF : charge l'offset persistant depuis EEPROM
         Serial.println("{\"boot\":\"SpotBot v3.1\",\"bno085\":true}");
     } else {
         Serial.println("{\"boot\":\"SpotBot v3.1\",\"bno085\":false,\"error\":\"BNO085 non detecte — verifiez I2C et adresse 0x4A\"}");
@@ -188,6 +240,18 @@ void loop() {
         last_imu_ms = millis();
         publishAll(cached_sonar_dist);
     }
+
+    // FIX NATIF v6 : save distribué — 1 octet EEPROM.write par boucle.
+    // write_byte(): 1 octet + delay(0)-equivalent (rien), dure ~3.3ms.
+    if (save_index > 0 && save_index <= 22) {
+        uint8_t idx = save_index - 1;
+        EEPROM.update(EEPROM_CALIB_ADDR + idx, save_buf[idx]);
+        save_index++;
+        if (save_index > 22) {
+            save_index = 0;  // termine
+            Serial.println("{\"info\":\"EEPROM_PERSISTED\"}");
+        }
+    }
 }
 
 // ============================================================
@@ -210,10 +274,49 @@ void readBNO085() {
             float sqy = bno.getQuatJ();
             float sqz = bno.getQuatK();
             // Appliquer une rotation de 180° autour de X (IMU montée à l'envers sous le robot)
-            bno_data.qw    = sqx;
-            bno_data.qx    = -sqw;
-            bno_data.qy    = -sqz;
-            bno_data.qz    = sqy;
+            float post_w = sqx;
+            float post_x = -sqw;
+            float post_y = -sqz;
+            float post_z = sqy;
+
+            // FIX NATIF : si resetBNO085() vient d'armer la capture, ancrer la pose
+            // post-X180 comme nouvel offset (avant le produit q_offset^-1 * q_post,
+            // sinon on composerait deux fois le meme quaternion et la calibration
+            // dériverait à chaque clic reset_imu).
+            if (flag_capture_initial_pose) {
+                flag_capture_initial_pose = false;
+                bno_data.q_offset_w = post_w;
+                bno_data.q_offset_x = post_x;
+                bno_data.q_offset_y = post_y;
+                bno_data.q_offset_z = post_z;
+                // FIX NATIF v6 : init save_buf + save_index=1, la save reelle
+                // est faite en 22 iterations de loop() (1 octet / iter).
+                save_calibration_init();
+                Serial.print("{\"info\":\"CAPTURED q_offset=[\"");
+                Serial.print(post_w, 4); Serial.print(",");
+                Serial.print(post_x, 4); Serial.print(",");
+                Serial.print(post_y, 4); Serial.print(",");
+                Serial.print(post_z, 4); Serial.println("]\"}");
+            }
+
+            // FIX NATIF : appliquer q_offset^-1 * q_post (produit de Hamilton, ROS conv).
+            // Pour un quaternion unitaire, l'inverse = le conjugue (qw, -qx, -qy, -qz).
+            float oqw = bno_data.q_offset_w;
+            float oqx = -bno_data.q_offset_x;
+            float oqy = -bno_data.q_offset_y;
+            float oqz = -bno_data.q_offset_z;
+            float cal_w = oqw*post_w - oqx*post_x - oqy*post_y - oqz*post_z;
+            float cal_x = oqw*post_x + oqx*post_w + oqy*post_z - oqz*post_y;
+            float cal_y = oqw*post_y - oqx*post_z + oqy*post_w + oqz*post_x;
+            float cal_z = oqw*post_z + oqx*post_y - oqy*post_x + oqz*post_w;
+            float nrm = sqrt(cal_w*cal_w + cal_x*cal_x + cal_y*cal_y + cal_z*cal_z);
+            if (nrm > 1e-6) {
+                cal_w /= nrm; cal_x /= nrm; cal_y /= nrm; cal_z /= nrm;
+            }
+            bno_data.qw    = cal_w;
+            bno_data.qx    = cal_x;
+            bno_data.qy    = cal_y;
+            bno_data.qz    = cal_z;
             bno_data.calib = bno.getQuatAccuracy();
             break;
         }
@@ -300,6 +403,7 @@ void parseCmd(const char* json) {
     else if (strstr(json, "\"sit\""))       setSit();
     else if (strstr(json, "\"stop\""))      stopServos();
     else if (strstr(json, "\"reset_imu\"")) resetBNO085();
+    else if (strstr(json, "\"clear_calib\"")) clear_calibration_from_eeprom();  // FIX NATIF
     else if (strstr(json, "\"attach\"")) {
         float val = parseNumAfterKey(json, "\"index\"");
         if (val != -999.0f) {
@@ -336,15 +440,97 @@ void parseCmd(const char* json) {
     }
 }
 
+// ============================================================
+// FIX NATIF : persistance + capture non-bloquante de la calibration IMU
+// ============================================================
+// FIX NATIF v6 : prepare le buffer de persistance + arme la save distribuee.
+// loop() ecrit 1 octet / iteration sur 22 iterations (1 EEPROM.update de 3.3ms
+// reparti sur ~440ms via le cadencement naturel de loop()). 16+ms libres entre
+// chaque strobe pour les ISRs BNO085/Wire/Serial -> fini le brownout BNO085
+// mi-ecriture ; le CRC protege l'integrite des 22 octets a la lecture.
+// Format save_buf : magic[4] + q_offset_wxyz[16] + crc16[2], little-endian.
+void save_calibration_init() {
+    save_buf[0] = (uint8_t)(BNO085_CALIB_MAGIC         & 0xFF);
+    save_buf[1] = (uint8_t)((BNO085_CALIB_MAGIC >>  8) & 0xFF);
+    save_buf[2] = (uint8_t)((BNO085_CALIB_MAGIC >> 16) & 0xFF);
+    save_buf[3] = (uint8_t)((BNO085_CALIB_MAGIC >> 24) & 0xFF);
+    memcpy(save_buf +  4, &bno_data.q_offset_w, 4);
+    memcpy(save_buf +  8, &bno_data.q_offset_x, 4);
+    memcpy(save_buf + 12, &bno_data.q_offset_y, 4);
+    memcpy(save_buf + 16, &bno_data.q_offset_z, 4);
+    uint16_t crc = crc16_ccitt(save_buf, 20);
+    save_buf[20] = (uint8_t)(crc & 0xFF);
+    save_buf[21] = (uint8_t)((crc >> 8) & 0xFF);
+    save_index = 1;  // loop() ecrit byte[0] a la 1re iteration puis ++
+}
+
+// FIX NATIF v4 : evite EEPROM.get( struct ) pour la meme raison que save.
+// Lecture byte by byte dans un buffer RAM, puis memcpy des floats vers la
+// struct BnoData. Simple, deterministe, pas de packed template issue.
+void load_calibration_from_eeprom() {
+    uint8_t buf[22];
+    for (uint8_t i = 0; i < 22; i++) {
+        buf[i] = EEPROM.read(EEPROM_CALIB_ADDR + i);
+    }
+    uint32_t magic =  (uint32_t)buf[0]
+                   | ((uint32_t)buf[1] << 8)
+                   | ((uint32_t)buf[2] << 16)
+                   | ((uint32_t)buf[3] << 24);
+    if (magic != BNO085_CALIB_MAGIC) {
+        // EEPROM vide (toutes les cases a 0xFF) ou jamais calibree -> identite
+        bno_data.q_offset_w = 1.0f;
+        bno_data.q_offset_x = 0.0f;
+        bno_data.q_offset_y = 0.0f;
+        bno_data.q_offset_z = 0.0f;
+        return;
+    }
+    uint16_t expected = crc16_ccitt(buf, 20);
+    uint16_t stored   = (uint16_t)buf[20] | ((uint16_t)buf[21] << 8);
+    if (expected != stored) {
+        Serial.println("{\"warn\":\"BNO085 EEPROM calibration CRC invalid - fallback identity\"}");
+        bno_data.q_offset_w = 1.0f;
+        bno_data.q_offset_x = 0.0f;
+        bno_data.q_offset_y = 0.0f;
+        bno_data.q_offset_z = 0.0f;
+        return;
+    }
+    memcpy(&bno_data.q_offset_w, buf + 4,  4);
+    memcpy(&bno_data.q_offset_x, buf + 8,  4);
+    memcpy(&bno_data.q_offset_y, buf + 12, 4);
+    memcpy(&bno_data.q_offset_z, buf + 16, 4);
+    Serial.print("{\"info\":\"EEPROM_LOADED q_offset=[\"");
+    Serial.print(bno_data.q_offset_w, 4); Serial.print(",");
+    Serial.print(bno_data.q_offset_x, 4); Serial.print(",");
+    Serial.print(bno_data.q_offset_y, 4); Serial.print(",");
+    Serial.print(bno_data.q_offset_z, 4); Serial.println("]\"}");
+}
+
+// ============================================================
+// FIX NATIF v3 : calibration IMU = software-only, pas de reset hardware
+// ============================================================
+// fix v3 a supprime l'appel `bno.begin()` dans resetBNO085(). Chaque appel
+// re-initialisait la session SHTP du BNO085, ce qui pouvait faire taire le
+// chip (events jamais emis) et bloquer readBNO085() dans un getSensorEvent()
+// infini. Maintenant la calibration est strictement logicielle : on arme
+// juste `flag_capture_initial_pose=true`, et la PROCHAINE trame
+// SENSOR_REPORTID_ROTATION_VECTOR dans readBNO085() devient la nouvelle
+// pose de reference pour q_offset.
+// ============================================================
 void resetBNO085() {
-    digitalWrite(BNO085_RST_PIN, LOW);
-    delay(10);
-    digitalWrite(BNO085_RST_PIN, HIGH);
-    delay(300);
-    bno.enableRotationVector(20);
-    bno.enableLinearAccelerometer(20);
-    bno.enableGyro(20);
-    Serial.println("{\"info\":\"BNO085 reset\"}");
+    flag_capture_initial_pose = true;
+    Serial.println("{\"info\":\"RESET_IMU_CMD_RECEIVED\"}");
+    Serial.println("{\"info\":\"BNO085 calibration-pending (soft capture on next Rotation Vector)\"}");
+}
+
+// Factory-reset : efface la calibration en EEPROM + force q_offset a identite
+// en RAM, sans toucher au hardware. Sert pour tests / debug.
+void clear_calibration_from_eeprom() {
+    bno_data.q_offset_w = 1.0f;
+    bno_data.q_offset_x = 0.0f;
+    bno_data.q_offset_y = 0.0f;
+    bno_data.q_offset_z = 0.0f;
+    save_calibration_init();
+    Serial.println("{\"info\":\"BNO085 EEPROM calibration cleared (factory reset)\"}");
 }
 
 void setStand() {

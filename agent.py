@@ -11,11 +11,14 @@ import urllib.request
 import subprocess
 import threading
 import ssl
-import socket
+import re
 from pathlib import Path
 
-# Set global socket timeout to prevent hangs
-socket.setdefaulttimeout(30.0)
+# NOTE: do NOT call socket.setdefaulttimeout() here. The websockets library
+# (used in start_websocket_client) requires non-blocking sockets; a global
+# default timeout silently freezes the asyncio event loop, preventing the
+# agent from ever receiving WS messages (start_camera, stop_camera, etc.).
+# The synchronous REST calls below already pass explicit timeout= args.
 
 # Config
 GATEWAY_URL = "https://ha.arthonetwork.fr:44888"
@@ -233,7 +236,7 @@ def detect_camera_change() -> dict:
         result[cam_id] = changed
     return result
 
-def _list_physical_usb_video_devices() -> list:
+def _list_physical_usb_video_devices() -> list[str]:
     """Return sorted /dev/videoN paths for physically-plugged USB UVC cameras.
 
     Reads /dev/v4l/by-id/ which only contains entries for cameras the kernel
@@ -254,6 +257,7 @@ def _list_physical_usb_video_devices() -> list:
         for entry in os.listdir(by_id_dir):
             if not entry.startswith("usb-"):
                 continue
+            # Filter metadata endpoints (not real cameras)
             if "index1" in entry or "metadata" in entry:
                 continue
             link = os.path.join(by_id_dir, entry)
@@ -273,22 +277,17 @@ def get_active_video_devices() -> list[str]:
 
     Reads /dev/v4l/by-id/* which only contains entries for cameras the kernel
     actually bound to a v4l2 driver. Resolves each symlink to its target
-    /dev/videoN and dedupes. Fallback to /dev/video0 + /dev/video2 so the dashboard
-    has something to show when by-id is empty (cold boot before cameras finish).
+    /dev/videoN and dedupes. Returns an EMPTY list when nothing is plugged.
     """
-    devices = _list_physical_usb_video_devices()
-    return devices if devices else ['/dev/video0', '/dev/video2']
+    return _list_physical_usb_video_devices()
+
 
 def check_camera_connected(cam_id: int) -> bool:
-    """Vérifie si une caméra V4L2 est connectée au système.
+    """Verifie si une camera V4L2 est connectee au systeme.
 
-    Ordre de vérification:
-    1. Le mapping du cam_id (chemin /dev/video*).
-    2. Fallback: /dev/v4l/by-id/ contient une entrée USB V4L2
-       (filtre les encodeurs hardware internes du Pi type bcm2835-isp).
-       Cela évite un false-negative quand le mapping est obsolète
-       après reboot ou renumérotation USB (certains drivers UVC ne
-       créent le device node quès qu´un userspace le bind).
+    Source de verite canonique: _list_physical_usb_video_devices() qui filtre
+    les endpoints metadata (video-index1) pour ne PAS compter 2 cameras
+    quand une seule est branchee.
     """
     mapping = get_camera_devices()
     dev = mapping.get(cam_id)
@@ -296,18 +295,12 @@ def check_camera_connected(cam_id: int) -> bool:
         dev = dev.get("device", dev)
     if dev and os.path.exists(dev):
         return True
-    # Fallback: au moins une caméra USB V4L2 visible pour le kernel
-    by_id_dir = "/dev/v4l/by-id"
-    if os.path.isdir(by_id_dir):
-        try:
-            usb_count = sum(1 for n in os.listdir(by_id_dir) if n.startswith("usb-"))
-            # Ne retourner True que si l index du cam est couvert par le nombre
-            # de cams USB. Evite de signaler cam2=true quand une seule cam est branchee.
-            if cam_id <= usb_count:
-                return True
-        except OSError:
-            pass
-    return False
+    # Fallback: utiliser _list_physical_usb_video_devices() qui filtre
+    # le endpoint metadata video-index1.
+    physical_devs = _list_physical_usb_video_devices()
+    return cam_id <= len(physical_devs)
+
+
 
 
 
@@ -637,7 +630,7 @@ def fetch_offsets_from_gateway():
     et les sauvegarde localement + les publie au ros2_listener.
     Ainsi, même si les offsets ont été sauvegardés via le dashboard
     pendant que le robot était éteint, ils sont appliqués au boot."""
-    global ros2_process
+    global ros2_process  # noqa: F824
     time.sleep(5)  # Attendre que ros2_listener soit prêt
     try:
         url = f"{GATEWAY_URL}/core/calibration"
@@ -668,6 +661,38 @@ def fetch_offsets_from_gateway():
     except Exception as e:
         print(f"[Agent] Impossible de récupérer les offsets depuis la Gateway : {e}")
         print("[Agent] Les offsets locaux existants seront utilisés (si présents).")
+
+# ─── DEFAULT CALIBRATION CHECK ──────────────────────────────────────────────
+
+def _is_default_camera_calib(calib: dict) -> bool:
+    """Retourne True si la calibration est la valeur par défaut (non calibrée).
+    Supporte les deux formats: dict {rows, cols, data} ET flat list."""
+    cm = calib.get("camera_matrix", {})
+    # Extraire fx, fy
+    if isinstance(cm, list):
+        fx = cm[0] if len(cm) > 0 else 600.0
+        fy = cm[4] if len(cm) > 4 else 600.0
+    elif isinstance(cm, dict):
+        data = cm.get("data", [600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0])
+        fx = data[0] if len(data) > 0 else 600.0
+        fy = data[4] if len(data) > 4 else 600.0
+    else:
+        return True
+
+    # Si fx/fy sont exactement 600.0 → suspect default
+    if abs(fx - 600.0) < 0.1 and abs(fy - 600.0) < 0.1:
+        # Vérifier aussi la distortion: si tout est à zéro → défaut confirmé
+        dc = calib.get("distortion_coefficients", {})
+        if isinstance(dc, list):
+            ddata = dc
+        elif isinstance(dc, dict):
+            ddata = dc.get("data", [0.0, 0.0, 0.0, 0.0, 0.0])
+        else:
+            ddata = [0.0] * 5
+        if all(abs(d) < 0.001 for d in ddata[:5]):
+            return True
+    return False
+
 
 # ─── CAMERA CALIBRATION SYNC FROM GATEWAY ───────────────────────────────────
 
@@ -765,10 +790,13 @@ def fetch_camera_cals_from_gateway():
             with open(path, "w", encoding="utf-8") as f:
                 f.write(yaml1)
         print(f"[Agent] Calibration caméra 1 récupérée → camera_calibration.yaml + camera_stereo_left.yaml")
-        # Marquer caméra 1 comme calibrée
+        # Marquer caméra 1 comme calibrée (sauf si valeurs par défaut)
+        is_default = _is_default_camera_calib(calib1)
         mapping = get_camera_devices()
         fp = mapping.get(1, {}).get("fingerprint") if isinstance(mapping.get(1), dict) else None
-        save_calibration_status(1, True, fp)
+        save_calibration_status(1, not is_default, fp)
+        if is_default:
+            print("[Agent] Calibration caméra 1: valeurs par défaut → marquée NON calibrée.")
     except Exception as e:
         print(f"[Agent] Impossible de récupérer la calibration caméra 1: {e}")
         print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
@@ -789,18 +817,40 @@ def fetch_camera_cals_from_gateway():
         with open(CAMERA_CALIB_RIGHT_FILE, "w", encoding="utf-8") as f:
             f.write(yaml2)
         print(f"[Agent] Calibration caméra 2 récupérée → camera_stereo_right.yaml")
-        # Marquer caméra 2 comme calibrée
+        # Marquer caméra 2 comme calibrée (sauf si valeurs par défaut)
+        is_default = _is_default_camera_calib(calib2)
         mapping = get_camera_devices()
         fp = mapping.get(2, {}).get("fingerprint") if isinstance(mapping.get(2), dict) else None
-        save_calibration_status(2, True, fp)
+        save_calibration_status(2, not is_default, fp)
+        if is_default:
+            print("[Agent] Calibration caméra 2: valeurs par défaut → marquée NON calibrée.")
     except Exception as e:
         print(f"[Agent] Impossible de récupérer la calibration caméra 2: {e}")
         print(f"[Agent] La calibration locale existante sera utilisée (si présente).")
 
+    # Stéréo : fetch la calibration stéréo complète (R, T, baseline, etc.)
+    try:
+        url = f"{GATEWAY_URL}/core/camera/calibration/stereo"
+        req = urllib.request.Request(url, headers={"X-API-Token": API_TOKEN}, method="GET")
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            stereo_calib = json.loads(resp.read().decode("utf-8"))
+        if stereo_calib.get("is_calibrated"):
+            try:
+                from camera import _json_calib_to_yaml_stereo, CAMERA_CALIB_STEREO_FILE
+                yml = _json_calib_to_yaml_stereo(stereo_calib)
+                CAMERA_CALIB_STEREO_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(CAMERA_CALIB_STEREO_FILE, "w", encoding="utf-8") as f:
+                    f.write(yml)
+                print(f"[Agent] Calibration stéréo récupérée → {CAMERA_CALIB_STEREO_FILE}")
+            except ImportError:
+                pass
+    except Exception as e:
+        print(f"[Agent] Impossible de récupérer la calibration stéréo: {e}")
+
 # ─── ROS 2 TELEMETRY SUBPROCESS ───────────────────────────────────────────────
 
 def start_ros2_listener():
-    global ros2_process, latest_telemetry
+    global ros2_process, latest_telemetry  # noqa: F824
     cmd = [
         "bash", "-c",
         "source /opt/ros2_jazzy/install/setup.bash && source /opt/spotbot/ros2_ws/install/setup.bash && python3 -u /opt/spotbot/ros2_listener.py"
@@ -1206,7 +1256,7 @@ def start_websocket_client():
             return
 
     async def ws_loop():
-        global tts_target, stt_target, chat_target, yolo_state, face_rec_state, ros2_process
+        global tts_target, stt_target, chat_target, yolo_state, face_rec_state, ros2_process  # noqa: F824
         uri = f"{WS_URL}?token={API_TOKEN}"
         while True:
             try:
@@ -1218,7 +1268,7 @@ def start_websocket_client():
                     # Concurrently broadcast telemetry data
                     async def send_telemetry_loop():
                         while True:
-                            global latest_telemetry
+                            global latest_telemetry  # noqa: F824
                             if latest_telemetry:
                                 try:
                                     # Inject fresh sensor booleans (overrides stale ROS-only payload so dashboard sees live state).
@@ -1237,10 +1287,18 @@ def start_websocket_client():
                                         print(f"[Agent - WS Send] Probes cam échouées: {probe_err}")
                                         cam1 = False
                                         cam2 = False
-                                    latest_telemetry["sensors"] = {
+                                    # setdefault().update() instead of `[key] = {...}`:
+                                    # the previous code wiped available_video_devices and
+                                    # every other sensor field the REST POST loop set 5s
+                                    # earlier. The new pattern only touches cam1/cam2 and
+                                    # the canonical USB device list (which the gateway's
+                                    # normalize_camera_manifest + _camera_manifest trust
+                                    # over the booleans if present).
+                                    latest_telemetry.setdefault("sensors", {}).update({
                                         "cam1_connected": bool(cam1),
                                         "cam2_connected": bool(cam2),
-                                    }
+                                        "available_video_devices": get_active_video_devices(),
+                                    })
 
                                     # Print debug once in a while
                                     if int(time.time()) % 10 == 0:
@@ -1432,12 +1490,479 @@ def start_websocket_client():
                                         CAMERA_MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
                                         with open(str(CAMERA_MAPPING_FILE), "w") as f_map:
                                             json.dump({"left": left, "right": right}, f_map)
-                                        subprocess.run(["sudo", "systemctl", "restart", "spotbot.service"])
+                                        # NOTE: do NOT restart spotbot.service here. With
+                                        # KillMode=mixed the cgroup cascade would tear down
+                                        # streaming_engine + every ros2 process every time
+                                        # the dashboard saves a mapping. The mapping file
+                                        # is now picked up by the engine on its next
+                                        # _check_hotplug tick (or on next boot).
                                         await ws.send(json.dumps({"type": "camera_mapping_saved", "status": "ok"}))
                                     except Exception as e_map:
                                         print(f"[Agent] Erreur sauvegarde mapping camera : {e_map}")
                                         await ws.send(json.dumps({"type": "camera_mapping_saved", "status": "error", "message": str(e_map)}))
+
+                                elif msg_type == "reset_calibration":
+                                    print("[Agent] Commande de reinitialisation calibration recue !")
+                                    try:
+                                        if CALIB_STATUS_FILE.exists():
+                                            CALIB_STATUS_FILE.unlink()
+                                            print("[Agent] calib_status.json supprime.")
+                                        # Effacer les YAML locaux
+                                        for p in [CAMERA_CALIB_MONO_FILE, CAMERA_CALIB_LEFT_FILE, CAMERA_CALIB_RIGHT_FILE]:
+                                            if p.exists():
+                                                p.unlink()
+                                                print(f"[Agent] {p.name} supprime.")
+                                        # Effacer stereo YAML
+                                        try:
+                                            from camera import CAMERA_CALIB_STEREO_FILE
+                                            if CAMERA_CALIB_STEREO_FILE.exists():
+                                                CAMERA_CALIB_STEREO_FILE.unlink()
+                                                print(f"[Agent] {CAMERA_CALIB_STEREO_FILE.name} supprime.")
+                                        except ImportError:
+                                            pass
+                                        await ws.send(json.dumps({"type": "calibration_reset", "status": "ok"}))
+                                    except Exception as e_reset:
+                                        print(f"[Agent] Erreur reset calibration: {e_reset}")
+                                        await ws.send(json.dumps({"type": "calibration_reset", "status": "error", "message": str(e_reset)}))
+
+                                elif msg_type == "run_stereo_calib":
+                                    print("[Agent] Commande de calibration stereo recue !")
+                                    cols = data.get("chessboard_cols", 9)
+                                    rows = data.get("chessboard_rows", 6)
+                                    square_mm = data.get("square_size_mm", 25)
+                                    num_pairs = data.get("num_pairs", 20)
+
+                                    async def _send_progress(pct, msg_text):
+                                        try:
+                                            await ws.send(json.dumps({
+                                                "type": "stereo_calib_progress",
+                                                "progress": pct,
+                                                "message": msg_text
+                                            }))
+                                        except Exception:
+                                            pass
+
+                                    _ws_ref = ws
+                                    _loop = asyncio.get_event_loop()
+
+                                    def _progress_sync(pct, msg_text):
+                                        asyncio.run_coroutine_threadsafe(
+                                            _send_progress(pct, msg_text), _loop
+                                        )
+
+                                    def _stereo_calib_task():
+                                        try:
+                                            import cv2
+                                            import numpy as np
+
+                                            _progress_sync(5, "Ouverture des cameras...")
+                                            mapping = get_camera_devices()
+                                            left_dev = mapping.get(1, {}).get("device", "/dev/video0") if isinstance(mapping.get(1), dict) else mapping.get(1, "/dev/video0")
+                                            right_dev = mapping.get(2, {}).get("device", "/dev/video2") if isinstance(mapping.get(2), dict) else mapping.get(2, "/dev/video2")
+
+                                            cap_l = cv2.VideoCapture(left_dev)
+                                            cap_r = cv2.VideoCapture(right_dev)
+                                            if not cap_l.isOpened():
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": "Camera gauche introuvable: " + left_dev})), _loop)
+                                                if cap_r.isOpened(): cap_r.release()
+                                                return
+                                            if not cap_r.isOpened():
+                                                cap_l.release()
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": "Camera droite introuvable: " + right_dev})), _loop)
+                                                return
+                                            cap_l.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                            cap_l.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                                            cap_r.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                            cap_r.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+                                            _progress_sync(10, "Capture des paires synchronisees...")
+                                            pat = (cols, rows)
+                                            sq_m = square_mm / 1000.0
+                                            objp = np.zeros((cols * rows, 3), np.float32)
+                                            objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * sq_m
+                                            objpts, il, ir = [], [], []
+                                            cap_n, warm = 0, 0
+                                            STABILITY_FRAMES_S = 8
+                                            STABILITY_PX_S = 3.0
+                                            DIVERSITY_CENTROID_PX_S = 35.0
+                                            stable_count_l, stable_count_r = 0, 0
+                                            prev_centroid_l, prev_centroid_r = None, None
+                                            collected_centroids_l, collected_centroids_r = [], []
+                                            found_any_s = False
+                                            for attempt in range(num_pairs * 8):
+                                                rl, fl = cap_l.read()
+                                                rr, fr = cap_r.read()
+                                                if not rl or not rr: continue
+                                                warm += 1
+                                                if warm < 5: continue
+                                                gl = cv2.cvtColor(fl, cv2.COLOR_BGR2GRAY)
+                                                gr = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+                                                flags_cb = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
+                                                fl_f, cl = cv2.findChessboardCorners(gl, pat, flags_cb)
+                                                fr_f, cr = cv2.findChessboardCorners(gr, pat, flags_cb)
+                                                
+                                                if fl_f and fr_f:
+                                                    found_any_s = True
+                                                    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                                                    cv2.cornerSubPix(gl, cl, (11, 11), (-1, -1), crit)
+                                                    cv2.cornerSubPix(gr, cr, (11, 11), (-1, -1), crit)
+                                                    
+                                                    c_l = np.mean(cl.reshape(-1, 2), axis=0)
+                                                    c_r = np.mean(cr.reshape(-1, 2), axis=0)
+                                                    
+                                                    if prev_centroid_l is not None:
+                                                        mov_l = float(np.linalg.norm(c_l - prev_centroid_l))
+                                                        mov_r = float(np.linalg.norm(c_r - prev_centroid_r))
+                                                    else:
+                                                        mov_l, mov_r = 999.0, 999.0
+                                                    
+                                                    prev_centroid_l, prev_centroid_r = c_l, c_r
+                                                    
+                                                    if mov_l < STABILITY_PX_S and mov_r < STABILITY_PX_S:
+                                                        stable_count_l += 1
+                                                        stable_count_r += 1
+                                                    else:
+                                                        stable_count_l, stable_count_r = 0, 0
+                                                    
+                                                    stable = (stable_count_l >= STABILITY_FRAMES_S and stable_count_r >= STABILITY_FRAMES_S)
+                                                    
+                                                    if stable:
+                                                        is_diverse = True
+                                                        for past_c in collected_centroids_l:
+                                                            if float(np.linalg.norm(c_l - past_c)) < DIVERSITY_CENTROID_PX_S:
+                                                                is_diverse = False
+                                                                break
+                                                        
+                                                        if is_diverse or cap_n == 0:
+                                                            objpts.append(objp); il.append(cl); ir.append(cr)
+                                                            collected_centroids_l.append(c_l)
+                                                            collected_centroids_r.append(c_r)
+                                                            cap_n += 1
+                                                            stable_count_l, stable_count_r = 0, 0
+                                                            pct = 10 + int(30 * cap_n / num_pairs)
+                                                            _progress_sync(pct, f"Damier stable ✓ — {cap_n}/{num_pairs} paires...")
+                                                            if cap_n >= num_pairs: break
+                                                    
+                                                    if attempt % 20 == 0:
+                                                        st = "✓ Stable" if stable else f"Stabilisation... {min(stable_count_l, stable_count_r)}/{STABILITY_FRAMES_S}"
+                                                        _progress_sync(10, f"Damier detecte — {st}")
+                                                else:
+                                                    stable_count_l, stable_count_r = 0, 0
+                                                    prev_centroid_l, prev_centroid_r = None, None
+                                                    if attempt % 60 == 0:
+                                                        _progress_sync(10, "En attente du damier sur les 2 cameras...")
+                                            cap_l.release(); cap_r.release()
+                                            if cap_n < 5:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": f"Pas assez de paires ({cap_n})"})), _loop)
+                                                return
+
+                                            _progress_sync(45, "Calibration mono gauche...")
+                                            _, ml, dl, _, _ = cv2.calibrateCamera(objpts, il, gl.shape[::-1], None, None)
+                                            _progress_sync(55, "Calibration mono droite...")
+                                            _, mr, dr, _, _ = cv2.calibrateCamera(objpts, ir, gr.shape[::-1], None, None)
+                                            _progress_sync(65, "cv2.stereoCalibrate...")
+                                            criteria_s = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5)
+                                            ret_s, ml, dl, mr, dr, R, T, E, F = cv2.stereoCalibrate(
+                                                objpts, il, ir, ml, dl, mr, dr, gl.shape[::-1],
+                                                criteria=criteria_s, flags=cv2.CALIB_FIX_INTRINSIC)
+                                            _progress_sync(75, "Rectification stereo...")
+                                            R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(ml, dl, mr, dr, gl.shape[::-1], R, T, alpha=0)
+                                            baseline = float(np.linalg.norm(T))
+                                            camera_bf = float(ml[0, 0]) * baseline
+
+                                            _progress_sync(85, "Sauvegarde des resultats...")
+                                            stereo_data = {
+                                                "image_width": gl.shape[1], "image_height": gl.shape[0],
+                                                "camera_name": "usb_cam",
+                                                "camera_matrix": ml.flatten().tolist(),
+                                                "distortion_coefficients": dl.flatten().tolist(),
+                                                "camera2_matrix": mr.flatten().tolist(),
+                                                "camera2_distortion": dr.flatten().tolist(),
+                                                "R": R.flatten().tolist(), "T": T.flatten().tolist(),
+                                                "E": E.flatten().tolist(), "F": F.flatten().tolist(),
+                                                "R1": R1.flatten().tolist(), "R2": R2.flatten().tolist(),
+                                                "P1": P1.flatten().tolist(), "P2": P2.flatten().tolist(),
+                                                "Q": Q.flatten().tolist(),
+                                                "baseline_m": baseline, "camera_bf": camera_bf,
+                                                "th_depth": 40.0, "is_calibrated": True,
+                                                "reprojection_error": float(ret_s),
+                                                "num_sample_pairs": cap_n,
+                                                "calibrated_at": time.strftime("%d/%m/%Y %H:%M:%S")
+                                            }
+                                            try:
+                                                url = f"{GATEWAY_URL}/core/camera/calibration/stereo"
+                                                req = urllib.request.Request(url,
+                                                    data=json.dumps(stereo_data).encode("utf-8"),
+                                                    headers={"Content-Type": "application/json", "X-API-Token": API_TOKEN},
+                                                    method="POST")
+                                                with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+                                                    resp.read()
+                                                print("[Agent] Calibration stereo sauvegardee sur la Gateway.")
+                                            except Exception as e_post:
+                                                print(f"[Agent] Erreur sauvegarde stereo Gateway: {e_post}")
+
+                                            # Save YAML locally
+                                            try:
+                                                from camera import _json_calib_to_yaml_stereo, CAMERA_CALIB_STEREO_FILE
+                                                yml = _json_calib_to_yaml_stereo(stereo_data)
+                                                CAMERA_CALIB_STEREO_FILE.parent.mkdir(parents=True, exist_ok=True)
+                                                with open(CAMERA_CALIB_STEREO_FILE, "w", encoding="utf-8") as f:
+                                                    f.write(yml)
+                                            except ImportError:
+                                                pass
+
+                                            _progress_sync(100, "Calibration stereo terminee !")
+                                            asyncio.run_coroutine_threadsafe(
+                                                _ws_ref.send(json.dumps({
+                                                    "type": "stereo_calib_result", "success": True,
+                                                    "message": f"OK (reproj: {ret_s:.4f}, baseline: {baseline*1000:.1f}mm)",
+                                                    "reprojection_error": float(ret_s),
+                                                    "baseline_mm": round(baseline * 1000, 1),
+                                                    "fx": round(float(ml[0, 0]), 2),
+                                                    "num_pairs": cap_n
+                                                })), _loop)
+                                        except Exception as e:
+                                            import traceback; traceback.print_exc()
+                                            try:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": str(e)})), _loop)
+                                            except Exception:
+                                                pass
+
+                                    threading.Thread(target=_stereo_calib_task, daemon=True).start()
                                     
+
+                                elif msg_type == "run_mono_calib":
+                                    cam_id = data.get("camera", 1)
+                                    cols = data.get("chessboard_cols", 9)
+                                    rows = data.get("chessboard_rows", 6)
+                                    square_mm = data.get("square_size_mm", 25)
+                                    timeout_s = data.get("timeout_seconds", 300)
+                                    
+                                    _ws_ref_mono = ws
+                                    _loop_mono = asyncio.get_event_loop()
+                                    
+                                    def _send_mono_progress(pct, msg_text):
+                                        try:
+                                            asyncio.run_coroutine_threadsafe(
+                                                _ws_ref_mono.send(json.dumps({
+                                                    "type": "mono_calib_progress",
+                                                    "camera": cam_id,
+                                                    "progress": pct,
+                                                    "message": msg_text
+                                                })), _loop_mono)
+                                        except Exception:
+                                            pass
+                                    
+                                    def _mono_calib_task():
+                                        try:
+                                            import cv2
+                                            import numpy as np
+                                            
+                                            _send_mono_progress(2, "Arret du stream WebRTC...")
+                                            time.sleep(1.5)
+                                            
+                                            mapping = get_camera_devices()
+                                            dev_info = mapping.get(cam_id, {})
+                                            dev = dev_info.get("device", f"/dev/video{2*(cam_id-1)}") if isinstance(dev_info, dict) else dev_info
+                                            
+                                            _send_mono_progress(5, f"Ouverture camera {dev}...")
+                                            cap = cv2.VideoCapture(dev)
+                                            if not cap.isOpened():
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref_mono.send(json.dumps({
+                                                        "type": "mono_calib_result", "camera": cam_id,
+                                                        "success": False, "message": f"Camera {dev} introuvable"
+                                                    })), _loop_mono)
+                                                return
+                                            
+                                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                                            
+                                            pat = (cols, rows)
+                                            sq_m = square_mm / 1000.0
+                                            objp = np.zeros((cols * rows, 3), np.float32)
+                                            objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * sq_m
+                                            objpts, imgpts = [], []
+                                            
+                                            STABILITY_FRAMES = 8
+                                            STABILITY_PX = 3.0
+                                            DIVERSITY_CENTROID_PX = 30.0
+                                            MAX_FRAMES = 2000
+                                            MIN_FRAMES = 10
+                                            
+                                            stable_count = 0
+                                            prev_centroid = None
+                                            collected_centroids = []
+                                            cap_n = 0
+                                            warm = 0
+                                            start_time = time.time()
+                                            found_any = False
+                                            
+                                            _send_mono_progress(8, "Recherche du damier... Presentez le damier face a la camera.")
+                                            
+                                            for attempt in range(MAX_FRAMES):
+                                                if time.time() - start_time > timeout_s:
+                                                    cap.release()
+                                                    asyncio.run_coroutine_threadsafe(
+                                                        _ws_ref_mono.send(json.dumps({
+                                                            "type": "mono_calib_result", "camera": cam_id,
+                                                            "success": False, "message": f"Timeout ({timeout_s}s) - damier non detecte"
+                                                        })), _loop_mono)
+                                                    return
+                                                
+                                                ret, frame = cap.read()
+                                                if not ret: continue
+                                                warm += 1
+                                                if warm < 5: continue
+                                                
+                                                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                                                flags_cb = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
+                                                found, corners = cv2.findChessboardCorners(gray, pat, flags_cb)
+                                                
+                                                if found:
+                                                    found_any = True
+                                                    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                                                    cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), crit)
+                                                    
+                                                    centroid = np.mean(corners.reshape(-1, 2), axis=0)
+                                                    
+                                                    if prev_centroid is not None:
+                                                        movement = float(np.linalg.norm(centroid - prev_centroid))
+                                                    else:
+                                                        movement = 999.0
+                                                    
+                                                    prev_centroid = centroid
+                                                    
+                                                    if movement < STABILITY_PX:
+                                                        stable_count += 1
+                                                    else:
+                                                        stable_count = 0
+                                                    
+                                                    if stable_count >= STABILITY_FRAMES:
+                                                        # Check diversity
+                                                        is_diverse = True
+                                                        for past_c in collected_centroids:
+                                                            dist = float(np.linalg.norm(centroid - past_c))
+                                                            if dist < DIVERSITY_CENTROID_PX:
+                                                                is_diverse = False
+                                                                break
+                                                        
+                                                        if is_diverse or cap_n == 0:
+                                                            objpts.append(objp)
+                                                            imgpts.append(corners)
+                                                            collected_centroids.append(centroid)
+                                                            cap_n += 1
+                                                            stable_count = 0
+                                                            
+                                                            pct = 8 + int(52 * cap_n / max(MIN_FRAMES, 30))
+                                                            status = "Stable" if stable_count < STABILITY_FRAMES else "✓ Capture"
+                                                            _send_mono_progress(min(pct, 60), f"Damier detecte {status} — {cap_n} frames collectees...")
+                                                            
+                                                            if cap_n >= MIN_FRAMES:
+                                                                break
+                                                    
+                                                    if attempt % 30 == 0:
+                                                        st = "✓ Stable" if stable_count >= STABILITY_FRAMES else (f"Stabilisation... {stable_count}/{STABILITY_FRAMES}")
+                                                        _send_mono_progress(8 + min(stable_count * 2, 20), f"Damier detecte — {st}")
+                                                else:
+                                                    stable_count = 0
+                                                    prev_centroid = None
+                                                    
+                                                    if attempt % 60 == 0 and not found_any:
+                                                        _send_mono_progress(8, "Recherche du damier... Placez le damier face a la camera.")
+                                            
+                                            cap.release()
+                                            
+                                            if cap_n < 5:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref_mono.send(json.dumps({
+                                                        "type": "mono_calib_result", "camera": cam_id,
+                                                        "success": False, "message": f"Pas assez de frames ({cap_n})"
+                                                    })), _loop_mono)
+                                                return
+                                            
+                                            _send_mono_progress(65, f"Calibration avec {cap_n} frames...")
+                                            
+                                            gray_shape = gray.shape[::-1]
+                                            ret_cal, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpts, imgpts, gray_shape, None, None)
+                                            
+                                            _send_mono_progress(80, "Sauvegarde des resultats...")
+                                            
+                                            calib_data = {
+                                                "image_width": gray_shape[0], "image_height": gray_shape[1],
+                                                "camera_name": f"usb_cam_{cam_id}",
+                                                "camera_matrix": {
+                                                    "rows": 3, "cols": 3,
+                                                    "data": mtx.flatten().tolist()
+                                                },
+                                                "distortion_model": "plumb_bob",
+                                                "distortion_coefficients": {
+                                                    "rows": 1, "cols": len(dist.flatten()),
+                                                    "data": dist.flatten().tolist()
+                                                },
+                                                "rectification_matrix": {
+                                                    "rows": 3, "cols": 3,
+                                                    "data": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                                                },
+                                                "projection_matrix": {
+                                                    "rows": 3, "cols": 4,
+                                                    "data": mtx[0].tolist() + [0.0] + mtx[1].tolist() + [0.0] + mtx[2].tolist() + [0.0]
+                                                },
+                                                "is_calibrated": True,
+                                                "reprojection_error": float(ret_cal),
+                                                "num_sample_frames": cap_n,
+                                                "fx": float(mtx[0, 0]), "fy": float(mtx[1, 1]),
+                                                "cx": float(mtx[0, 2]), "cy": float(mtx[1, 2]),
+                                                "calibrated_at": time.strftime("%d/%m/%Y %H:%M:%S")
+                                            }
+                                            
+                                            # Save to Gateway
+                                            try:
+                                                url = f"{GATEWAY_URL}/core/camera/calibration/{cam_id}"
+                                                req = urllib.request.Request(url,
+                                                    data=json.dumps(calib_data).encode("utf-8"),
+                                                    headers={"Content-Type": "application/json", "X-API-Token": API_TOKEN},
+                                                    method="POST")
+                                                with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+                                                    resp.read()
+                                                print(f"[Agent] Calibration mono cam {cam_id} sauvegardee sur Gateway.")
+                                            except Exception as e_post:
+                                                print(f"[Agent] Erreur sauvegarde mono Gateway: {e_post}")
+                                            
+                                            # Update calibration status
+                                            mapping = get_camera_devices()
+                                            fp = mapping.get(cam_id, {}).get("fingerprint") if isinstance(mapping.get(cam_id), dict) else None
+                                            save_calibration_status(cam_id, True, fp)
+                                            
+                                            _send_mono_progress(100, f"Calibration reussie ! (reproj: {ret_cal:.4f}, fx: {mtx[0,0]:.1f})")
+                                            asyncio.run_coroutine_threadsafe(
+                                                _ws_ref_mono.send(json.dumps({
+                                                    "type": "mono_calib_result", "camera": cam_id,
+                                                    "success": True,
+                                                    "message": f"OK (reproj: {ret_cal:.4f}, fx: {mtx[0,0]:.1f})",
+                                                    "reprojection_error": float(ret_cal),
+                                                    "fx": round(float(mtx[0, 0]), 2),
+                                                    "fy": round(float(mtx[1, 1]), 2),
+                                                    "num_frames": cap_n
+                                                })), _loop_mono)
+                                        
+                                        except Exception as e:
+                                            import traceback; traceback.print_exc()
+                                            try:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    _ws_ref_mono.send(json.dumps({
+                                                        "type": "mono_calib_result", "camera": cam_id,
+                                                        "success": False, "message": str(e)
+                                                    })), _loop_mono)
+                                            except Exception:
+                                                pass
+                                    
+                                    threading.Thread(target=_mono_calib_task, daemon=True).start()
+
                                 elif msg_type == "feature_request":
                                     feature = data.get("feature")
                                     state = data.get("state")

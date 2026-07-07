@@ -2,6 +2,7 @@ import sys
 import json
 import time
 import math
+import os
 import queue
 import threading
 import subprocess
@@ -19,6 +20,9 @@ class ROS2TelemetryListener(Node):
         super().__init__('ros2_telemetry_listener')
         
         self.joints = [90.0] * 12
+        # FIX NATIF v2 : le firmware Arduino gère 100% la calibration (EEPROM +
+        # q_offset^-1 dans readBNO085). ros2_listener ne fait que calculer RPY
+        # pour le dashboard, sans aucun état de calibration local.
         self.imu = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
         self.pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
         self.path = []
@@ -78,10 +82,18 @@ class ROS2TelemetryListener(Node):
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
         
+        # FIX NATIF : ne PAS soustraire de offset ici. Le quaternion recu sur
+        # /imu/data est deja calibre par arduino_bridge_node.py. Conversion RPY directe.
+        roll_deg = round(math.degrees(roll), 1)
+        pitch_deg = round(math.degrees(pitch), 1)
+        yaw_deg = round(math.degrees(yaw), 1)
+        # Normalize yaw to [-180, 180]
+        while yaw_deg > 180: yaw_deg -= 360
+        while yaw_deg < -180: yaw_deg += 360
         self.imu = {
-            "roll": round(math.degrees(roll), 1),
-            "pitch": round(math.degrees(pitch), 1),
-            "yaw": round(math.degrees(yaw), 1)
+            "roll": roll_deg,
+            "pitch": pitch_deg,
+            "yaw": yaw_deg
         }
         
     def _update_pose_from_msg(self, pos, ori):
@@ -176,16 +188,20 @@ class ROS2TelemetryListener(Node):
                     if cmd:
                         motion_msg = String()
                         if cmd in ["attach", "detach", "write"]:
-                            # Strip "type" key to reduce serial payload (Arduino RX buffer = 64 bytes)
                             compact = {}
                             for k in ["cmd", "index", "angle"]:
                                 if k in msg_json:
                                     compact[k] = msg_json[k]
                             motion_msg.data = json.dumps(compact)
-
                         else:
                             motion_msg.data = cmd
-                            self.pose_pub.publish(motion_msg)
+                            # FIX NATIF v2 : le mot reset_imu est juste transmis tel quel
+                            # a l'Arduino via /cmd_motion (-> arduino_bridge -> serial ->
+                            # resetBNO085() qui arme flag_capture_initial_pose). Le firmware
+                            # Arduino capture la prochaine pose, l'offset EEPROM, et
+                            # applique q_offset^-1 sur toutes les trames suivants.
+                            if cmd == "reset_imu":
+                                self.get_logger().info("IMU reset -> transmis a l'Arduino (capture asynchrone + EEPROM persist)")
                         self.motion_pub.publish(motion_msg)
                 elif msg_json.get("type") == "cmd_vel":
                     twist = Twist()
@@ -208,11 +224,20 @@ class ROS2TelemetryListener(Node):
                     self.stream_cmd_pub.publish(String(data=json.dumps({"command": "stop", "camera": cam_id})))
             except Exception:
                 pass
+            # NOTE: dead `q.put_nowait(frame_data)` block removed — `q` and
+            # `frame_data` were undefined, which killed this daemon thread
+            # on the first `for` iteration after the inner try/except, so
+            # `start_camera`/`stop_camera` messages from the agent never
+            # reached the /streaming/command publisher.
 
-            try:
-                q.put_nowait(frame_data)
-            except queue.Full:
-                pass # Drop frame to save CPU and avoid blocking callback thread
+        # EOF reached: the parent agent.py died (or closed its write end of
+        # the stdin pipe). Without this os._exit, the main thread keeps
+        # rclpy.spin() alive forever, leaving an orphaned ROS 2 node with
+        # the same name as the next agent restart's node → duplicate-node
+        # name conflicts that silently break DDS discovery (the
+        # streaming_engine stops seeing the new /streaming/command
+        # publisher, so ffmpeg never spawns).
+        os._exit(0)
 
 def main():
     rclpy.init()

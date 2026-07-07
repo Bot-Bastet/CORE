@@ -26,3 +26,13 @@ config/local_*.yaml
 .idea/
 *.code-workspace
 spot_mini_mini*.zip
+
+# Debug artifacts / agent scratch files (created during local agent debugging)
+# Note: there are NO conventional Python private modules (_module.py) in this codebase,
+# so `_*.py` below is safe as a debug-pattern. Revisit if a `_helpers.py` is ever added.
+*.bak
+_*.txt
+_*.tmp
+_*.sh
+_*.py
+extract_*.txt

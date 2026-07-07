@@ -128,6 +128,128 @@ def _json_calib_to_yaml(calib: dict) -> str:
     lines.append("")
     return "\n".join(lines)
 
+
+def _json_calib_to_yaml_stereo(calib: dict) -> str:
+    """Convert stereo calibration JSON to ORB_SLAM3 stereo YAML format.
+    Includes left/right intrinsics, Tlr (left→right transform),
+    Camera.bf (baseline×fx), ThDepth, and rectification matrices.
+    """
+    def _flat(lst, default):
+        """Extract flat list from either list or {rows,cols,data} dict."""
+        if isinstance(lst, dict):
+            return lst.get('data', default)
+        if isinstance(lst, list) and len(lst) > 0:
+            return lst
+        return default
+
+    def fmt_num(x):
+        if isinstance(x, float) and x == int(x):
+            return f"{int(x)}.0"
+        return str(float(x)) if isinstance(x, (int, float)) else str(x)
+
+    def fmt_matrix(rows, cols, data, indent=4):
+        lines = []
+        for r in range(rows):
+            row_data = [fmt_num(data[r * cols + c]) for c in range(cols)]
+            lines.append(f"{' ' * indent}{', '.join(row_data)}")
+        return ",\n".join(lines)
+
+    # Extract data
+    cm_left = _flat(calib.get("camera_matrix", []), [600.0, 0, 320, 0, 600.0, 240, 0, 0, 1.0])
+    dc_left = _flat(calib.get("distortion_coefficients", []), [0.0]*5)
+    cm_right = _flat(calib.get("camera2_matrix", []), [600.0, 0, 320, 0, 600.0, 240, 0, 0, 1.0])
+    dc_right = _flat(calib.get("camera2_distortion", []), [0.0]*5)
+    R = _flat(calib.get("R", []), [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0])
+    T = _flat(calib.get("T", []), [0.0, 0.0, 0.0])
+
+    w = calib.get("image_width", 640)
+    h = calib.get("image_height", 480)
+    fx = cm_left[0] if len(cm_left) > 0 else 600.0
+    baseline = calib.get("baseline_m", abs(T[0]) if len(T) > 0 else 0.05)
+    camera_bf = calib.get("camera_bf", fx * baseline)
+    th_depth = calib.get("th_depth", 40.0)
+
+    lines = ["%YAML:1.0"]
+    lines.append("")
+    lines.append("#--------------------------------------------------------------------------------------------")
+    lines.append("# Camera Parameters. Adjust them!")
+    lines.append("#--------------------------------------------------------------------------------------------")
+    lines.append("Camera.type: \"PinHole\"")
+    lines.append("")
+
+    # Left camera
+    lines.append("# Left Camera calibration and distortion parameters (OpenCV)")
+    lines.append(f"Camera.fx: {fmt_num(cm_left[0] if len(cm_left) > 0 else 600)}")
+    lines.append(f"Camera.fy: {fmt_num(cm_left[4] if len(cm_left) > 4 else 600)}")
+    lines.append(f"Camera.cx: {fmt_num(cm_left[2] if len(cm_left) > 2 else 320)}")
+    lines.append(f"Camera.cy: {fmt_num(cm_left[5] if len(cm_left) > 5 else 240)}")
+    lines.append("")
+    lines.append("# distortion parameters")
+    lines.append(f"Camera.k1: {fmt_num(dc_left[0] if len(dc_left) > 0 else 0)}")
+    lines.append(f"Camera.k2: {fmt_num(dc_left[1] if len(dc_left) > 1 else 0)}")
+    lines.append(f"Camera.p1: {fmt_num(dc_left[2] if len(dc_left) > 2 else 0)}")
+    lines.append(f"Camera.p2: {fmt_num(dc_left[3] if len(dc_left) > 3 else 0)}")
+    lines.append("")
+
+    # Right camera
+    lines.append("# Right Camera calibration and distortion parameters (OpenCV)")
+    lines.append(f"Camera2.fx: {fmt_num(cm_right[0] if len(cm_right) > 0 else 600)}")
+    lines.append(f"Camera2.fy: {fmt_num(cm_right[4] if len(cm_right) > 4 else 600)}")
+    lines.append(f"Camera2.cx: {fmt_num(cm_right[2] if len(cm_right) > 2 else 320)}")
+    lines.append(f"Camera2.cy: {fmt_num(cm_right[5] if len(cm_right) > 5 else 240)}")
+    lines.append("")
+    lines.append("# distortion parameters")
+    lines.append(f"Camera2.k1: {fmt_num(dc_right[0] if len(dc_right) > 0 else 0)}")
+    lines.append(f"Camera2.k2: {fmt_num(dc_right[1] if len(dc_right) > 1 else 0)}")
+    lines.append(f"Camera2.p1: {fmt_num(dc_right[2] if len(dc_right) > 2 else 0)}")
+    lines.append(f"Camera2.p2: {fmt_num(dc_right[3] if len(dc_right) > 3 else 0)}")
+    lines.append("")
+
+    # Tlr: 3x4 or 4x4 transformation matrix from left to right camera
+    # Build Tlr as [R|T] 3x4 matrix with optional 4th row [0,0,0,1]
+    has_R = len(R) >= 9
+    has_T = len(T) >= 3
+    if has_R and has_T:
+        tlr_data = [
+            R[0], R[1], R[2], T[0],
+            R[3], R[4], R[5], T[1],
+            R[6], R[7], R[8], T[2]
+        ]
+    else:
+        tlr_data = [1.0, 0, 0, baseline, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+
+    lines.append("Tlr: !!opencv-matrix")
+    lines.append("  rows: 3")
+    lines.append("  cols: 4")
+    lines.append("  dt: f")
+    lines.append(f"  data: [{fmt_matrix(3, 4, tlr_data)}]")
+    lines.append("")
+
+    lines.append("")
+    lines.append("# Camera resolution")
+    lines.append(f"Camera.width: {w}")
+    lines.append(f"Camera.height: {h}")
+    lines.append("")
+    lines.append("# Camera frames per second")
+    lines.append("Camera.fps: 30.0")
+    lines.append("")
+    lines.append("# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)")
+    lines.append("Camera.RGB: 1")
+    lines.append("")
+    lines.append("# Image scale, it changes the image size to be processed (<1.0: reduce, >1.0: increase)")
+    lines.append("Camera.imageScale: 1.0")
+    lines.append("")
+    lines.append("# Close/Far threshold. Baseline times.")
+    lines.append(f"ThDepth: {fmt_num(th_depth)}")
+    lines.append("# stereo baseline times fx")
+    lines.append(f"Camera.bf: {fmt_num(camera_bf)}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+CAMERA_CALIB_STEREO_FILE = Path("/opt/spotbot/config/orb_slam3_stereo.yaml")
+
 def fetch_camera_cals_from_gateway():
     time.sleep(7)
     for cam_id in [1, 2]:

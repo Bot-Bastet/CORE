@@ -3,7 +3,7 @@ Agent temps-reel pour le robot Bastet (Pi 5).
 Rapporte la version, l'etat des capteurs/systeme a la Gateway,
 et ecoute le WebSocket pour declencher les mises a jour en direct.
 """
-import os, json, threading, ssl
+import os, json, socket, threading, ssl
 from pathlib import Path
 socket.setdefaulttimeout(30.0)
 GATEWAY_URL = "https://ha.arthonetwork.fr:44888"
