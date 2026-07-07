@@ -202,6 +202,14 @@ class ROS2TelemetryListener(Node):
                             # applique q_offset^-1 sur toutes les trames suivants.
                             if cmd == "reset_imu":
                                 self.get_logger().info("IMU reset -> transmis a l'Arduino (capture asynchrone + EEPROM persist)")
+                            
+                            # Si c'est une commande de pose pour stopper ou réactiver le robot,
+                            # on la transmet aussi à motion_node.py via /cmd_pose.
+                            if cmd in ["stop", "stand", "sit"]:
+                                pose_msg = String()
+                                pose_msg.data = cmd
+                                self.pose_pub.publish(pose_msg)
+                                self.get_logger().info(f"Pose cmd '{cmd}' transmise aussi a /cmd_pose pour motion_node")
                         self.motion_pub.publish(motion_msg)
                 elif msg_json.get("type") == "cmd_vel":
                     twist = Twist()
