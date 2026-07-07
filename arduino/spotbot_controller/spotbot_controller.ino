@@ -79,7 +79,7 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.18"
+#define SKETCH_VERSION    "v0.2.19"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       500000
 #define IMU_PUBLISH_MS    50      // 20 Hz

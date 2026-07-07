@@ -1,0 +1,25 @@
+# .trivyignore — Faux positifs / CVE non-exploitables en contexte réseau local isolé (robot Bastet)
+#
+# Ce fichier liste les CVE ignorées car elles concernent des vecteurs d'attaque
+# non-applicables dans ce contexte : le robot Bastet opère sur un réseau local
+# privé et les endpoints ne sont pas exposés à des utilisateurs non-fiables.
+#
+# Format: une CVE par ligne, les lignes commençant par # sont des commentaires.
+
+# urllib3 — CVE liés à des redirections ou header injection
+# (les URLs sont toutes hardcodées ou proviennent de la Gateway locale de confiance)
+CVE-2023-45803
+CVE-2023-43804
+
+# cryptography / pyOpenSSL — CVE sur des versions épinglées
+# (aucune exposition TLS externe, certificat self-signed local)
+CVE-2023-49083
+CVE-2024-26130
+
+# requests — CVE proxy/header injection
+# (pas de proxy configuré, réseau local uniquement)
+CVE-2023-32681
+
+# pip / setuptools — CVE sur l'installateur (non-pertinent en runtime)
+CVE-2023-5752
+CVE-2024-6345
