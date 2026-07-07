@@ -15,13 +15,15 @@ Publie:
 """
 
 import time
+import math
 
 import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import String, Float32MultiArray
-from geometry_msgs.msg import Twist
-from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Twist, Quaternion
+from sensor_msgs.msg import JointState, Imu
+from nav_msgs.msg import Odometry
 
 from .gait_controller import GaitController
 
@@ -57,6 +59,11 @@ class MotionNode(Node):
         self._omega = 0.0
         self._mode  = 'stop'  # 'stand', 'walk', 'sit', 'stop'
 
+        # Variables d'odometrie
+        self._odom_x = 0.0
+        self._odom_y = 0.0
+        self._odom_yaw = 0.0
+
         # Publishers
         self._joint_angles_pub = self.create_publisher(
             Float32MultiArray, '/cmd_joint_angles', 10
@@ -64,11 +71,15 @@ class MotionNode(Node):
         self._joint_state_pub = self.create_publisher(
             JointState, '/joint_states', 10
         )
+        self._odom_pub = self.create_publisher(
+            Odometry, '/odom/kinematic', 10
+        )
 
         # Subscribers
         self.create_subscription(Twist,  '/cmd_vel',  self._cmd_vel_cb,  10)
         self.create_subscription(String, '/cmd_gait', self._cmd_gait_cb, 10)
         self.create_subscription(String, '/cmd_pose', self._cmd_pose_cb, 10)
+        self.create_subscription(Imu,    '/imu/data', self._imu_cb,      10)
 
         # Timer principal
         self._last_cmd_time = time.time()
@@ -103,6 +114,23 @@ class MotionNode(Node):
             self._vx = self._vy = self._omega = 0.0
             self.get_logger().info(f'Pose: {cmd}')
 
+    def _imu_cb(self, msg: Imu):
+        import math
+        q = msg.orientation
+        # Calcul du roulis (roll, rotation axe X)
+        sinr_cosp = 2 * (q.w * q.x + q.y * q.z)
+        cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        # Calcul du tangage (pitch, rotation axe Y)
+        sinp = 2 * (q.w * q.y - q.z * q.x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+
+        self._gait.set_imu_feedback(roll, pitch)
+
     # ------------------------------------------------------------------
     # Boucle principale
     # ------------------------------------------------------------------
@@ -116,12 +144,32 @@ class MotionNode(Node):
         # Calculer les angles
         if self._mode == 'walk':
             angles_deg = self._gait.step(self._dt, self._vx, self._vy, self._omega)
+            # Estimation de la vitesse reelle (efficacite moyenne de 90%)
+            gait_efficiency = 0.90
+            vx_est = self._vx * gait_efficiency
+            vy_est = self._vy * gait_efficiency
+            omega_est = self._omega * gait_efficiency
         elif self._mode == 'sit':
             angles_deg = self._gait.sit()
+            vx_est = vy_est = omega_est = 0.0
         elif self._mode == 'stop':
             return  # Ne rien envoyer
         else:  # stand
             angles_deg = self._gait.stand()
+            vx_est = vy_est = omega_est = 0.0
+
+        # Integration de la pose odometrique (repere global odom)
+        dx = vx_est * self._dt
+        dy = vy_est * self._dt
+        dyaw = omega_est * self._dt
+
+        self._odom_yaw += dyaw
+        # Rotation de l'increment de deplacement dans le repere global
+        self._odom_x += dx * math.cos(self._odom_yaw) - dy * math.sin(self._odom_yaw)
+        self._odom_y += dx * math.sin(self._odom_yaw) + dy * math.cos(self._odom_yaw)
+
+        # Publier l'odometrie cinematique
+        self._publish_odometry(vx_est, vy_est, omega_est)
 
         # Publier les angles
         self._publish_joints(angles_deg)
@@ -140,6 +188,55 @@ class MotionNode(Node):
         js.name         = self.JOINT_NAMES
         js.position     = [math.radians(a - 90.0) for a in angles_deg[:12]]
         self._joint_state_pub.publish(js)
+
+    def _publish_odometry(self, vx: float, vy: float, omega: float):
+        import math
+
+        odom = Odometry()
+        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.frame_id = 'odom'
+        odom.child_frame_id = 'base_link'
+
+        # Position
+        odom.pose.pose.position.x = self._odom_x
+        odom.pose.pose.position.y = self._odom_y
+        odom.pose.pose.position.z = 0.0
+
+        # Orientation yaw -> Quaternion
+        cy = math.cos(self._odom_yaw * 0.5)
+        sy = math.sin(self._odom_yaw * 0.5)
+        q = Quaternion()
+        q.w = cy
+        q.x = 0.0
+        q.y = 0.0
+        q.z = sy
+        odom.pose.pose.orientation = q
+
+        # Twist (vitesses dans base_link)
+        odom.twist.twist.linear.x = vx
+        odom.twist.twist.linear.y = vy
+        odom.twist.twist.angular.z = omega
+
+        # Covariances standard pour odom_kinematic
+        odom.pose.covariance = [
+            0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  999.0, 0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  999.0, 0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  999.0, 0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.05
+        ]
+
+        odom.twist.covariance = [
+            0.02, 0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.02, 0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  999.0, 0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  999.0, 0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  999.0, 0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.1
+        ]
+
+        self._odom_pub.publish(odom)
 
 
 def main(args=None):

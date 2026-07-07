@@ -100,12 +100,19 @@ class GaitController:
         self.freq    = freq
         self.t       = 0.0  # temps courant [s]
         self.offsets = self.PHASE_OFFSETS.get(gait, self.PHASE_OFFSETS['trot'])
+        self.roll    = 0.0
+        self.pitch   = 0.0
 
     def set_gait(self, gait: str):
         """Change la demarche."""
         if gait in self.PHASE_OFFSETS:
             self.gait    = gait
             self.offsets = self.PHASE_OFFSETS[gait]
+
+    def set_imu_feedback(self, roll: float, pitch: float):
+        """Met a jour l'orientation IMU pour la stabilisation d'assiette active."""
+        self.roll  = roll
+        self.pitch = pitch
 
     def step(self, dt: float, vx: float = 0.0, vy: float = 0.0,
              omega: float = 0.0) -> list[float]:
@@ -134,14 +141,26 @@ class GaitController:
             pos = self.bezier.foot_trajectory(phase,
                                                vx + rot_x,
                                                vy + rot_y)
+            # Stabilisation d'assiette active via IMU feedback
+            dz = -hip[0] * math.sin(self.pitch) - hip[1] * math.sin(self.roll)
+            # Limiter la compensation a +/- 3.5 cm pour eviter les saturations d'IK
+            dz = max(-0.035, min(0.035, dz))
+            pos[2] += dz
             foot_positions[leg] = pos
 
         return self.ik.solve_for_feet(foot_positions)
 
-    def stand(self) -> list[float]:
-        """Retourne les angles position debout."""
-        return self.ik.stand_pose()
+    def stand(self, body_height: float = None) -> list[float]:
+        """Retourne les angles position debout avec stabilisation active."""
+        h = body_height if body_height is not None else SpotIK.STAND_HEIGHT
+        foot_positions = {}
+        for leg in ['fr', 'fl', 'br', 'bl']:
+            hip = SpotIK.HIP_POSITIONS[leg]
+            dz = -hip[0] * math.sin(self.pitch) - hip[1] * math.sin(self.roll)
+            dz = max(-0.035, min(0.035, dz))
+            foot_positions[leg] = np.array([0.0, 0.0, h + dz])
+        return self.ik.solve_for_feet(foot_positions)
 
     def sit(self) -> list[float]:
-        """Retourne les angles position assise."""
-        return self.ik.sit_pose()
+        """Retourne les angles position assise avec stabilisation active."""
+        return self.stand(body_height=-0.08)

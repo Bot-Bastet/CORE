@@ -117,6 +117,37 @@ def generate_launch_description():
         output='screen'
     )
 
+    # ---- EKF Sensor Fusion (robot_localization) ----
+    ekf_config = PathJoinSubstitution([
+        FindPackageShare('spotbot_bringup'), 'config', 'ekf.yaml'
+    ])
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[ekf_config]
+    )
+
+    # ---- Navigation 2 (Nav2) ----
+    nav2_params_file = PathJoinSubstitution([
+        FindPackageShare('spotbot_bringup'), 'config', 'nav2_params.yaml'
+    ])
+    nav2_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare('nav2_bringup'), 'launch', 'bringup_launch.py'
+            ])
+        ]),
+        launch_arguments={
+            'use_sim_time': 'false',
+            'params_file': nav2_params_file,
+            'autostart': 'true',
+            'map': '', # Laisse vide pour utiliser le SLAM en temps reel
+        }.items(),
+        condition=IfCondition(nav)
+    )
+
     streaming_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -137,6 +168,8 @@ def generate_launch_description():
                      " slam=", LaunchConfiguration('slam'),
                      " streaming=", LaunchConfiguration('streaming')]),
         description_launch,
+        ekf_node,
+        nav2_launch,
         slam_mono_launch,
         arduino_bridge_launch,
         streaming_launch,

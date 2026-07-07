@@ -132,10 +132,6 @@ ros2 run tf2_ros static_transform_publisher \
   --x 0 --y -0.06 --z 0 --roll 0 --pitch 0 --yaw 0 \
   --frame-id camera_link --child-frame-id camera2_link \
   >> $LOG/tf.log 2>&1 &
-ros2 run tf2_ros static_transform_publisher \
-  --x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 \
-  --frame-id odom --child-frame-id base_link \
-  >> $LOG/tf.log 2>&1 &
 echo "[SpotBot] TF OK" | tee -a $LOG/startup.log
 sleep 3
 
