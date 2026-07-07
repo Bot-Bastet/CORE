@@ -250,6 +250,24 @@ def _json_calib_to_yaml_stereo(calib: dict) -> str:
 
 CAMERA_CALIB_STEREO_FILE = Path("/opt/spotbot/config/orb_slam3_stereo.yaml")
 
+def _is_default_camera_calib(calib: dict) -> bool:
+    cm = calib.get("camera_matrix", {})
+    if isinstance(cm, list):
+        fx = cm[0] if len(cm) > 0 else 600.0
+        fy = cm[4] if len(cm) > 4 else 600.0
+    elif isinstance(cm, dict):
+        data = cm.get("data", [600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0])
+        fx = data[0] if len(data) > 0 else 600.0
+        fy = data[4] if len(data) > 4 else 600.0
+    else:
+        return True
+    if abs(fx - 600.0) < 0.1 and abs(fy - 600.0) < 0.1:
+        dc = calib.get("distortion_coefficients", {})
+        ddata = dc if isinstance(dc, list) else dc.get("data", [0.0, 0.0, 0.0, 0.0, 0.0]) if isinstance(dc, dict) else [0.0] * 5
+        if all(abs(d) < 0.001 for d in ddata[:5]):
+            return True
+    return False
+
 def fetch_camera_cals_from_gateway():
     time.sleep(7)
     for cam_id in [1, 2]:
@@ -262,8 +280,25 @@ def fetch_camera_cals_from_gateway():
             paths = [CAMERA_CALIB_MONO_FILE, CAMERA_CALIB_LEFT_FILE] if cam_id == 1 else [CAMERA_CALIB_RIGHT_FILE]
             for path in paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f: f.write(yaml_data)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(yaml_data)
+            is_default = _is_default_camera_calib(calib)
             mapping = get_camera_devices()
             fp = mapping.get(cam_id, {}).get("fingerprint") if isinstance(mapping.get(cam_id), dict) else None
-            save_calibration_status(cam_id, True, fp)
-        except Exception as e: print(f"[Agent] Impossible de recuperer calibration camera {cam_id}: {e}")
+            save_calibration_status(cam_id, not is_default, fp)
+        except Exception as e:
+            print(f"[Agent] Impossible de recuperer calibration camera {cam_id}: {e}")
+
+    try:
+        url = f"{GATEWAY_URL}/core/camera/calibration/stereo"
+        req = urllib.request.Request(url, headers={"X-API-Token": API_TOKEN}, method="GET")
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            stereo_calib = json.loads(resp.read().decode("utf-8"))
+        if stereo_calib.get("is_calibrated"):
+            yml = _json_calib_to_yaml_stereo(stereo_calib)
+            CAMERA_CALIB_STEREO_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(CAMERA_CALIB_STEREO_FILE, "w", encoding="utf-8") as f:
+                f.write(yml)
+            print(f"[Agent] Calibration stereo recuperee → {CAMERA_CALIB_STEREO_FILE}")
+    except Exception as e:
+        print(f"[Agent] Impossible de recuperer calibration stereo: {e}")
