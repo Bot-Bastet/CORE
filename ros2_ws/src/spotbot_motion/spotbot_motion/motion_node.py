@@ -20,6 +20,7 @@ import math
 import rclpy
 from rclpy.node import Node
 
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String, Float32MultiArray
 from geometry_msgs.msg import Twist, Quaternion
 from sensor_msgs.msg import JointState, Imu
@@ -79,7 +80,9 @@ class MotionNode(Node):
         self.create_subscription(Twist,  '/cmd_vel',  self._cmd_vel_cb,  10)
         self.create_subscription(String, '/cmd_gait', self._cmd_gait_cb, 10)
         self.create_subscription(String, '/cmd_pose', self._cmd_pose_cb, 10)
-        self.create_subscription(Imu,    '/imu/data', self._imu_cb,      10)
+        
+        imu_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=10)
+        self.create_subscription(Imu,    '/imu/data', self._imu_cb,      imu_qos)
 
         # Timer principal
         self._last_cmd_time = time.time()

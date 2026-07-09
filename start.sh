@@ -180,6 +180,42 @@ echo "[SpotBot] Motion Control OK" | tee -a $LOG/startup.log
 sleep 2
 
 # ============================================
+# 5b. EKF Sensor Fusion (robot_localization)
+# ============================================
+ros2 run robot_localization ekf_node --ros-args \
+  --params-file /opt/spotbot/ros2_ws/install/spotbot_bringup/share/spotbot_bringup/config/ekf.yaml \
+  -r /odometry/filtered:=/odom \
+  >> $LOG/ekf.log 2>&1 &
+echo "[SpotBot] EKF Sensor Fusion launched" | tee -a $LOG/startup.log
+
+# Wait for the node to be discovered in ROS graph
+echo "[SpotBot] Waiting for EKF node to appear in graph..." | tee -a $LOG/startup.log
+for i in {1..20}; do
+  if ros2 node list --no-daemon 2>/dev/null | grep -q "ekf_filter_node"; then
+    echo "[SpotBot] EKF node detected!" | tee -a $LOG/startup.log
+    break
+  fi
+  sleep 1
+done
+
+ros2 lifecycle set /ekf_filter_node configure --no-daemon >> $LOG/ekf.log 2>&1
+ros2 lifecycle set /ekf_filter_node activate --no-daemon >> $LOG/ekf.log 2>&1
+echo "[SpotBot] EKF Sensor Fusion Active" | tee -a $LOG/startup.log
+sleep 2
+
+# ============================================
+# 5c. Navigation 2 (Nav2)
+# ============================================
+ros2 launch nav2_bringup bringup_launch.py \
+  use_sim_time:=false \
+  params_file:=/opt/spotbot/ros2_ws/install/spotbot_bringup/share/spotbot_bringup/config/nav2_params.yaml \
+  autostart:=true \
+  map:="" \
+  >> $LOG/nav2.log 2>&1 &
+echo "[SpotBot] Navigation 2 OK" | tee -a $LOG/startup.log
+sleep 2
+
+# ============================================
 # 6. ROSboard
 # ============================================
 ros2 run rosboard rosboard_node >> $LOG/rosboard.log 2>&1 &

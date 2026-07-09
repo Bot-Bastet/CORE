@@ -42,6 +42,34 @@ chat_target = "robot"
 yolo_state = "robot"
 face_rec_state = "robot"
 
+calibration_cancel_events = {
+    1: threading.Event(),
+    2: threading.Event()
+}
+stereo_calibration_cancel_event = threading.Event()
+
+def stop_spotbot_service():
+    try:
+        print("[Agent] Arret de spotbot.service pour liberer la camera...")
+        subprocess.run(["systemctl", "stop", "spotbot.service"], check=True)
+    except Exception as e:
+        print(f"[Agent] Erreur lors de l'arret de spotbot.service : {e}")
+
+def start_spotbot_service():
+    try:
+        print("[Agent] Redemarrage de spotbot.service...")
+        subprocess.run(["systemctl", "start", "spotbot.service"], check=True)
+    except Exception as e:
+        print(f"[Agent] Erreur lors du demarrage de spotbot.service : {e}")
+
+def get_cap_device(device_path):
+    if isinstance(device_path, str) and device_path.startswith("/dev/video"):
+        try:
+            return int(device_path.replace("/dev/video", ""))
+        except ValueError:
+            pass
+    return device_path
+
 def get_version() -> str:
     if VERSION_FILE.exists():
         try:
@@ -121,43 +149,11 @@ from camera import (
     CALIB_STATUS_FILE,
     CAMERA_CALIB_MONO_FILE,
     CAMERA_CALIB_LEFT_FILE,
-    CAMERA_CALIB_RIGHT_FILE
+    CAMERA_CALIB_RIGHT_FILE,
+    _list_physical_usb_video_devices
 )
 
-def _list_physical_usb_video_devices() -> list[str]:
-    """Return sorted /dev/videoN paths for physically-plugged USB UVC cameras.
 
-    Reads /dev/v4l/by-id/ which only contains entries for cameras the kernel
-    actually bound to a v4l2 driver. EXCLUDES UVC metadata endpoints
-    ('video-index1', 'metadata' in name) -- those are NOT independent cameras:
-    a single physical USB UVC camera creates 2 by-id entries (capture + metadata)
-    and would otherwise be counted twice, causing the dashboard to falsely report
-    2 cameras when only 1 is plugged.
-
-    Shared by check_camera_connected() and get_active_video_devices() -- DO NOT
-    diverge the filter rule between callers.
-    """
-    out = set()
-    by_id_dir = "/dev/v4l/by-id"
-    if not os.path.isdir(by_id_dir):
-        return []
-    try:
-        for entry in os.listdir(by_id_dir):
-            if not entry.startswith("usb-"):
-                continue
-            # Filter metadata endpoints (not real cameras)
-            if "index1" in entry or "metadata" in entry:
-                continue
-            link = os.path.join(by_id_dir, entry)
-            try:
-                real = os.path.realpath(link)
-                if real.startswith("/dev/video"):
-                    out.add(real)
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return sorted(out)
 
 
 def get_active_video_devices() -> list[str]:
@@ -181,11 +177,24 @@ def check_camera_connected(cam_id: int) -> bool:
     dev = mapping.get(cam_id)
     if dev and isinstance(dev, dict):
         dev = dev.get("device", dev)
-    if dev and os.path.exists(dev):
-        return True
-    # Fallback: utiliser _list_physical_usb_video_devices() qui filtre
-    # le endpoint metadata video-index1.
+    if not dev:
+        return False
+    
     physical_devs = _list_physical_usb_video_devices()
+    if physical_devs:
+        try:
+            real_dev = os.path.realpath(dev)
+        except Exception:
+            real_dev = dev
+        return real_dev in physical_devs
+        
+    # Fallback si _list_physical_usb_video_devices() est vide
+    if dev and os.path.exists(dev):
+        # Ne pas compter les devices video impairs comme connectes si c'est la cam 2
+        # (souvent video1 est metadata de video0)
+        if cam_id == 2 and (dev == "/dev/video1" or dev == "/dev/video3"):
+            return False
+        return True
     return cam_id <= len(physical_devs)
 
 
@@ -843,6 +852,9 @@ def start_websocket_client():
                                     
                                 elif msg_type == "stop_camera":
                                     cam = data.get("camera", 1)
+                                    if cam in calibration_cancel_events:
+                                        calibration_cancel_events[cam].set()
+                                    stereo_calibration_cancel_event.set()
                                     if ros2_process and ros2_process.stdin:
                                         ros2_process.stdin.write(json.dumps(data) + "\n")
                                         ros2_process.stdin.flush()
@@ -1013,6 +1025,7 @@ def start_websocket_client():
 
                                 elif msg_type == "run_stereo_calib":
                                     print("[Agent] Commande de calibration stereo recue !")
+                                    stereo_calibration_cancel_event.clear()
                                     cols = data.get("chessboard_cols", 9)
                                     rows = data.get("chessboard_rows", 6)
                                     square_mm = data.get("square_size_mm", 25)
@@ -1041,13 +1054,18 @@ def start_websocket_client():
                                             import cv2
                                             import numpy as np
 
+                                            _progress_sync(2, "Arret temporaire du service ROS 2...")
+                                            stop_spotbot_service()
+                                            time.sleep(2.0)
+
+                                            if stereo_calibration_cancel_event.is_set(): return
                                             _progress_sync(5, "Ouverture des cameras...")
                                             mapping = get_camera_devices()
                                             left_dev = mapping.get(1, {}).get("device", "/dev/video0") if isinstance(mapping.get(1), dict) else mapping.get(1, "/dev/video0")
                                             right_dev = mapping.get(2, {}).get("device", "/dev/video2") if isinstance(mapping.get(2), dict) else mapping.get(2, "/dev/video2")
 
-                                            cap_l = cv2.VideoCapture(left_dev)
-                                            cap_r = cv2.VideoCapture(right_dev)
+                                            cap_l = cv2.VideoCapture(get_cap_device(left_dev))
+                                            cap_r = cv2.VideoCapture(get_cap_device(right_dev))
                                             if not cap_l.isOpened():
                                                 asyncio.run_coroutine_threadsafe(
                                                     _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": "Camera gauche introuvable: " + left_dev})), _loop)
@@ -1078,6 +1096,7 @@ def start_websocket_client():
                                             collected_centroids_l, collected_centroids_r = [], []
                                             found_any_s = False
                                             for attempt in range(num_pairs * 8):
+                                                if stereo_calibration_cancel_event.is_set(): return
                                                 rl, fl = cap_l.read()
                                                 rr, fr = cap_r.read()
                                                 if not rl or not rr: continue
@@ -1217,12 +1236,16 @@ def start_websocket_client():
                                                     _ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": str(e)})), _loop)
                                             except Exception:
                                                 pass
+                                        finally:
+                                            start_spotbot_service()
 
                                     threading.Thread(target=_stereo_calib_task, daemon=True).start()
                                     
 
                                 elif msg_type == "run_mono_calib":
                                     cam_id = data.get("camera", 1)
+                                    if cam_id in calibration_cancel_events:
+                                        calibration_cancel_events[cam_id].clear()
                                     cols = data.get("chessboard_cols", 9)
                                     rows = data.get("chessboard_rows", 6)
                                     square_mm = data.get("square_size_mm", 25)
@@ -1248,15 +1271,17 @@ def start_websocket_client():
                                             import cv2
                                             import numpy as np
                                             
-                                            _send_mono_progress(2, "Arret du stream WebRTC...")
-                                            time.sleep(1.5)
+                                            _send_mono_progress(2, "Arret temporaire du service ROS 2...")
+                                            stop_spotbot_service()
+                                            time.sleep(2.0)
                                             
                                             mapping = get_camera_devices()
                                             dev_info = mapping.get(cam_id, {})
                                             dev = dev_info.get("device", f"/dev/video{2*(cam_id-1)}") if isinstance(dev_info, dict) else dev_info
                                             
+                                            if calibration_cancel_events[cam_id].is_set(): return
                                             _send_mono_progress(5, f"Ouverture camera {dev}...")
-                                            cap = cv2.VideoCapture(dev)
+                                            cap = cv2.VideoCapture(get_cap_device(dev))
                                             if not cap.isOpened():
                                                 asyncio.run_coroutine_threadsafe(
                                                     _ws_ref_mono.send(json.dumps({
@@ -1300,6 +1325,7 @@ def start_websocket_client():
                                                         })), _loop_mono)
                                                     return
                                                 
+                                                if calibration_cancel_events[cam_id].is_set(): return
                                                 ret, frame = cap.read()
                                                 if not ret: continue
                                                 warm += 1
@@ -1446,6 +1472,8 @@ def start_websocket_client():
                                                     })), _loop_mono)
                                             except Exception:
                                                 pass
+                                        finally:
+                                            start_spotbot_service()
                                     
                                     threading.Thread(target=_mono_calib_task, daemon=True).start()
 

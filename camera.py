@@ -10,20 +10,84 @@ from state import (
     CAMERA_CALIB_LEFT_FILE, CAMERA_CALIB_RIGHT_FILE, CAMERA_CALIB_MONO_FILE,
 )
 
+def _list_physical_usb_video_devices() -> list[str]:
+    """Return sorted list of /dev/videoN paths bound to currently-plugged USB cameras.
+    Excludes metadata nodes (video-index1).
+    """
+    out = set()
+    by_id_dir = "/dev/v4l/by-id"
+    if not os.path.isdir(by_id_dir):
+        return []
+    try:
+        for entry in os.listdir(by_id_dir):
+            if not entry.startswith("usb-"):
+                continue
+            # Filter metadata endpoints (not real cameras)
+            if "index1" in entry or "metadata" in entry:
+                continue
+            link = os.path.join(by_id_dir, entry)
+            try:
+                real = os.path.realpath(link)
+                if real.startswith("/dev/video"):
+                    out.add(real)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return sorted(out)
+
 def get_camera_devices() -> dict:
-    default_mapping = {1: {"device": "/dev/video0", "fingerprint": None}, 2: {"device": "/dev/video2", "fingerprint": None}}
+    physical_devs = _list_physical_usb_video_devices()
+    
+    # Charger la configuration enregistrée si elle existe
+    saved_left = None
+    saved_right = None
     if CAMERA_MAPPING_FILE.exists():
         try:
             data = json.loads(CAMERA_MAPPING_FILE.read_text())
-            left = data.get("left"); right = data.get("right")
-            if left: default_mapping[1] = left if isinstance(left, dict) else {"device": left, "fingerprint": None}
-            if right: default_mapping[2] = right if isinstance(right, dict) else {"device": right, "fingerprint": None}
-        except Exception: pass
+            saved_left = data.get("left")
+            saved_right = data.get("right")
+            if saved_left and isinstance(saved_left, dict):
+                saved_left = saved_left.get("device")
+            if saved_right and isinstance(saved_right, dict):
+                saved_right = saved_right.get("device")
+        except Exception:
+            pass
+
+    # Résoudre les périphériques réels
+    left_dev = None
+    right_dev = None
+    
+    if saved_left and os.path.exists(saved_left):
+        left_dev = saved_left
+    if saved_right and os.path.exists(saved_right):
+        if saved_right != left_dev:
+            right_dev = saved_right
+
+    # Fallback/Auto-détection : si non défini ou non branché, on pioche dans les caméras physiques
+    available = [d for d in physical_devs if d != left_dev and d != right_dev]
+    
+    if not left_dev:
+        if available:
+            left_dev = available.pop(0)
+        else:
+            left_dev = "/dev/video0"
+            
+    if not right_dev:
+        if available:
+            right_dev = available.pop(0)
+        else:
+            right_dev = "/dev/video2"
+
+    default_mapping = {
+        1: {"device": left_dev, "fingerprint": None},
+        2: {"device": right_dev, "fingerprint": None}
+    }
+    
     for cam_id in [1, 2]:
         dev_info = default_mapping[cam_id]
-        if isinstance(dev_info, dict):
-            if not dev_info.get("fingerprint"): dev_info["fingerprint"] = get_camera_fingerprint(dev_info["device"])
-        else: default_mapping[cam_id] = {"device": dev_info, "fingerprint": get_camera_fingerprint(dev_info)}
+        dev_info["fingerprint"] = get_camera_fingerprint(dev_info["device"])
+        
     return default_mapping
 
 def get_camera_fingerprint(device: str) -> str:
@@ -43,11 +107,18 @@ def get_camera_fingerprint(device: str) -> str:
     return device
 
 def get_calibration_status() -> dict:
-    # Mode secours/rendu rapide : forcer calibrated à True pour toutes les caméras
-    return {
-        1: {"calibrated": True, "fingerprint": "forced_left"},
-        2: {"calibrated": True, "fingerprint": "forced_right"}
+    default = {
+        1: {"calibrated": True, "fingerprint": None},
+        2: {"calibrated": True, "fingerprint": None}
     }
+    if CALIB_STATUS_FILE.exists():
+        try:
+            data = json.loads(CALIB_STATUS_FILE.read_text())
+            for cam_id in [1, 2]:
+                if str(cam_id) in data: default[cam_id] = data[str(cam_id)]
+                elif cam_id in data: default[cam_id] = data[cam_id]
+        except Exception: pass
+    return default
 
 def save_calibration_status(cam_id: int, calibrated: bool, fingerprint: str = None):
     status = get_calibration_status()

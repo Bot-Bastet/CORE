@@ -126,7 +126,8 @@ def generate_launch_description():
         executable='ekf_node',
         name='ekf_filter_node',
         output='screen',
-        parameters=[ekf_config]
+        parameters=[ekf_config],
+        remappings=[('/odometry/filtered', '/odom')]
     )
 
     # ---- Navigation 2 (Nav2) ----
