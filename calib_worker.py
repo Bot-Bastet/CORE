@@ -12,6 +12,7 @@ from camera import get_camera_devices, save_calibration_status
 def run_mono_calib_thread(ws_ref, loop, data):
     """Lance la tâche de calibration mono dans un thread dédié."""
     cam_id = data.get("camera", 1)
+    config.calibration_cancel_events[cam_id].clear()
     cols = data.get("chessboard_cols", 9)
     rows = data.get("chessboard_rows", 6)
     square_mm = data.get("square_size_mm", 25)
@@ -102,6 +103,7 @@ def run_mono_calib_thread(ws_ref, loop, data):
                     continue
                 
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                mean_brightness = float(np.mean(gray))
                 flags_cb = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
                 found, corners = cv2.findChessboardCorners(gray, pat, flags_cb)
                 
@@ -154,7 +156,10 @@ def run_mono_calib_thread(ws_ref, loop, data):
                     prev_centroid = None
                     
                     if attempt % 60 == 0 and not found_any:
-                        _send_mono_progress(8, "Recherche du damier... Placez le damier face a la camera.")
+                        if mean_brightness < 15.0:
+                            _send_mono_progress(8, "Recherche du damier (⚠️ Image tres sombre)... Allumez la lumiere.")
+                        else:
+                            _send_mono_progress(8, "Recherche du damier... Placez le damier face a la camera.")
             
             # released in finally
             
@@ -254,6 +259,7 @@ def run_mono_calib_thread(ws_ref, loop, data):
 
 def run_stereo_calib_thread(ws_ref, loop, data):
     """Lance la tâche de calibration stéréo dans un thread dédié."""
+    config.stereo_calibration_cancel_event.clear()
     cols = data.get("chessboard_cols", 9)
     rows = data.get("chessboard_rows", 6)
     square_mm = data.get("square_size_mm", 25)
@@ -330,6 +336,8 @@ def run_stereo_calib_thread(ws_ref, loop, data):
                     continue
                 gl = cv2.cvtColor(fl, cv2.COLOR_BGR2GRAY)
                 gr = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+                mean_brightness_l = float(np.mean(gl))
+                mean_brightness_r = float(np.mean(gr))
                 flags_cb = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
                 fl_f, cl = cv2.findChessboardCorners(gl, pat, flags_cb)
                 fr_f, cr = cv2.findChessboardCorners(gr, pat, flags_cb)
@@ -384,7 +392,10 @@ def run_stereo_calib_thread(ws_ref, loop, data):
                     stable_count_l, stable_count_r = 0, 0
                     prev_centroid_l, prev_centroid_r = None, None
                     if attempt % 60 == 0:
-                        _progress_sync(10, "En attente du damier sur les 2 cameras...")
+                        if mean_brightness_l < 15.0 or mean_brightness_r < 15.0:
+                            _progress_sync(10, "En attente du damier (⚠️ Image tres sombre)... Allumez la lumiere.")
+                        else:
+                            _progress_sync(10, "En attente du damier sur les 2 cameras...")
             # released in finally
             if cap_n < 5:
                 asyncio.run_coroutine_threadsafe(
