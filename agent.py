@@ -292,6 +292,10 @@ def start_websocket_client():
                                 elif msg_type == "start_camera":
                                     cam = data.get("camera", 1)
                                     v_slam = data.get("v_slam", False)
+                                    if not is_spotbot_service_active():
+                                        print("[Agent] start_camera reçu mais spotbot.service est inactif ! Démarrage du service...")
+                                        subprocess.run(["sudo", "systemctl", "start", "spotbot.service"])
+                                        await asyncio.sleep(2.0)
                                     if v_slam:
                                         cal_status = get_calibration_status()
                                         cam_cal = cal_status.get(cam, {})
@@ -549,6 +553,9 @@ def start_websocket_client():
                             except json.JSONDecodeError:
                                 pass
                     finally:
+                        for cam in config.calibration_cancel_events:
+                            config.calibration_cancel_events[cam].set()
+                        config.stereo_calibration_cancel_event.set()
                         telemetry_task.cancel()
             except Exception as e:
                 print(f"[Agent] Déconnexion WebSocket ({e}). Reconnexion dans 5s...")
@@ -558,6 +565,9 @@ def start_websocket_client():
 
 if __name__ == "__main__":
     print(f"--- Démarrage de l'Agent Bastet ({config.get_version()}) ---")
+    if not is_spotbot_service_active():
+        print("[Agent] spotbot.service n'est pas actif au démarrage. Lancement du service...")
+        start_spotbot_service()
     start_ros2_listener()
     
     threading.Thread(target=fetch_offsets_from_gateway, daemon=True).start()
