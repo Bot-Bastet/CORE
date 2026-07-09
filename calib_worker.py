@@ -31,6 +31,7 @@ def run_mono_calib_thread(ws_ref, loop, data):
             pass
 
     def _mono_calib_task():
+        cap = None
         try:
             _send_mono_progress(2, "Arret temporaire du service ROS 2...")
             stop_spotbot_service()
@@ -81,7 +82,7 @@ def run_mono_calib_thread(ws_ref, loop, data):
             
             for attempt in range(MAX_FRAMES):
                 if time.time() - start_time > timeout_s:
-                    cap.release()
+                    # released in finally
                     asyncio.run_coroutine_threadsafe(
                         ws_ref.send(json.dumps({
                             "type": "mono_calib_result", "camera": cam_id,
@@ -155,7 +156,7 @@ def run_mono_calib_thread(ws_ref, loop, data):
                     if attempt % 60 == 0 and not found_any:
                         _send_mono_progress(8, "Recherche du damier... Placez le damier face a la camera.")
             
-            cap.release()
+            # released in finally
             
             if cap_n < 5:
                 asyncio.run_coroutine_threadsafe(
@@ -239,6 +240,12 @@ def run_mono_calib_thread(ws_ref, loop, data):
             except Exception:
                 pass
         finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                    print("[Agent] VideoCapture mono relache.")
+                except Exception:
+                    pass
             start_spotbot_service()
 
     import threading
@@ -265,6 +272,8 @@ def run_stereo_calib_thread(ws_ref, loop, data):
             pass
 
     def _stereo_calib_task():
+        cap_l = None
+        cap_r = None
         try:
             _progress_sync(2, "Arret temporaire du service ROS 2...")
             stop_spotbot_service()
@@ -376,7 +385,7 @@ def run_stereo_calib_thread(ws_ref, loop, data):
                     prev_centroid_l, prev_centroid_r = None, None
                     if attempt % 60 == 0:
                         _progress_sync(10, "En attente du damier sur les 2 cameras...")
-            cap_l.release(); cap_r.release()
+            # released in finally
             if cap_n < 5:
                 asyncio.run_coroutine_threadsafe(
                     ws_ref.send(json.dumps({"type": "stereo_calib_result", "success": False, "message": f"Pas assez de paires ({cap_n})"})), loop)
@@ -456,6 +465,18 @@ def run_stereo_calib_thread(ws_ref, loop, data):
             except Exception:
                 pass
         finally:
+            if cap_l is not None:
+                try:
+                    cap_l.release()
+                    print("[Agent] VideoCapture gauche relache.")
+                except Exception:
+                    pass
+            if cap_r is not None:
+                try:
+                    cap_r.release()
+                    print("[Agent] VideoCapture droite relache.")
+                except Exception:
+                    pass
             start_spotbot_service()
 
     import threading
