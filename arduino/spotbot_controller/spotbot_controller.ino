@@ -1,11 +1,28 @@
 /*
- * SpotBot Controller — Arduino Mega v3.1
+ * SpotBot Controller — Arduino Mega v3.2
  * =========================================
  * IMU : BNO085 uniquement (I2C, adresse 0x4A)
  * Servos : 12x MG996R (D2-D13, alim externe 6V/10A)
  * Sonar  : HC-SR04 (TRIG=D22, ECHO=D23) — optionnel
  *
- * JSON emis (50 Hz):
+ * NOUVEAUTES v3.2 :
+ *   - Limites d'angle individuelles par servo (EEPROM addr 22-219)
+ *   - Offsets zero par servo (EEPROM addr 220-317)
+ *   - Commandes set_limit / get_limits / set_offset / get_offsets / query
+ *   - rx_doc.clear() avant chaque deserializeJson() → fix micro-mouvements
+ *   - Offsets appliqués en hardware dans l'Arduino (pas dans le Pi)
+ *
+ * EEPROM layout :
+ *   Addr 0..21    : IMU calibration (magic + q_offset[4] + CRC16) [existant]
+ *   Addr 22..69   : servo_min_limit[12] floats (48 bytes)
+ *   Addr 70..117  : servo_max_limit[12] floats (48 bytes)
+ *   Addr 118..121 : magic limits uint32_t = 0xBEEFCAFE
+ *   Addr 122..123 : CRC16 limits
+ *   Addr 124..171 : servo_offset[12] floats (48 bytes)
+ *   Addr 172..175 : magic offsets uint32_t = 0xDEADF00D
+ *   Addr 176..177 : CRC16 offsets
+ *
+ * JSON emis (20 Hz):
  * {
  *   "imu":{
  *     "qw":10000,"qx":0,"qy":0,"qz":0,  ← quaternion * 10000
@@ -13,12 +30,19 @@
  *     "gx":0,"gy":0,"gz":0,              ← gyro mrad/s * 1000
  *     "calib":3                          ← calibration 0-3 (3=parfait)
  *   },
- *   "sonar":{"dist_cm":42.5,"valid":true,"alert":false}
+ *   "sonar":{"dist_cm":42.5,"valid":true,"alert":false},
+ *   "servos":[90,90,...],               ← 12 angles courants (degrés bruts, sans offset)
+ *   "version":"v0.2.20"
  * }
  *
  * JSON recu:
- *   {"servos":[90,90,...]}   (12 angles 0-180°)
- *   {"cmd":"stand"}          (stand | sit | stop | reset_imu)
+ *   {"servos":[90,90,...]}              (12 angles 0-180°, avant offset)
+ *   {"cmd":"stand"}                     (stand | sit | stop | reset_imu | query)
+ *   {"cmd":"set_limit","index":i,"min":x,"max":y}
+ *   {"cmd":"get_limits"}
+ *   {"cmd":"set_offset","index":i,"offset":x}
+ *   {"cmd":"get_offsets"}
+ *   {"cmd":"query"}                     → répond avec positions + limites + offsets
  *
  * BRANCHEMENTS:
  *   Servos D2-D13  — alim externe 6V/10A (GND commun Arduino)
@@ -27,43 +51,41 @@
  *   HC-SR04 TRIG→D22, ECHO→D23, VCC→5V, GND
  *
  * LIBRAIRIE:
- *   arduino-cli lib install "SparkFun BNO08x"
+ *   arduino-cli lib install "SparkFun BNO08x Cortex Based IMU"
+ *   arduino-cli lib install "ArduinoJson"
  */
 
 #include <Arduino.h>
 #include <Servo.h>
 #include <Wire.h>
-#include <EEPROM.h>          // FIX NATIF: persistance de la calibration IMU en EEPROM
+#include <EEPROM.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
+#include <ArduinoJson.h>
 
 // ============================================================
 // FIX NATIF : Calibration IMU persistante en EEPROM Arduino
 // ============================================================
-// Layout EEPROM Mega2560 (22 octets à l'adresse 0).
-// IMPORTANT : `crc` est en DERNIER (packed) — comme ça `offsetof(EepromImuCalib, crc)`
-// donne 20 (sizeof de magic + 4 floats), donc le CRC couvre magic + q_offset ensemble,
-// pas juste le magic. Sinon une corruption des floats passerait silencieusement.
-//   Adr 0  ..3   : magic uint32_t  = BNO085_CALIB_MAGIC  (detecte "calibree" vs usine)
-//   Adr 4  ..19  : q_offset_wxyz  float[4]  (pose post-X180 capturee lors de reset_imu)
-//   Adr 20 ..21  : crc   uint16_t  CRC16-CCITT sur magic+q_offset
-// ============================================================
 #define BNO085_CALIB_MAGIC 0xCAFEBABEul
 #define EEPROM_CALIB_ADDR   0
 
-// FIX NATIF v4 : on retire __attribute__((packed)) — sur AVR gcc, le qualifier
-// packed + EEPROM.put() (template avec reference) peut declencher un bug
-// silencieux du compilateur qui ecrit partiellement les 22 octets vers
-// l'EEPROM. On evite completement la voie templatee en faisant des
-// EEPROM.write() octet par octet, avec un buffer RAM uint8_t[22] dont on
-// calcule le CRC16 a la fin. Aussi v4 utilise un signed-magic 0xCAFEBABE
-// inversé (plus distinctif que BEEFCAFE pour detecter des coupures) :
-//   magic bytes little-endian EF BE CA FE → uint32 = 0xCAFEBABE.
 struct EepromImuCalib {
     uint32_t magic;
-    float qw, qx, qy, qz;   // q_offset persistant (conjugue de la pose post-X180 capturee)
-    uint16_t crc;            // CRC16-CCITT sur magic + q_offset
+    float qw, qx, qy, qz;
+    uint16_t crc;
 };
 static_assert(sizeof(EepromImuCalib) == 22, "EEPROM layout doit faire 22 octets");
+
+// ============================================================
+// Limites servo (EEPROM addr 22-123)
+// ============================================================
+#define SERVO_LIMITS_MAGIC  0xBEEFCAFEul
+#define EEPROM_LIMITS_ADDR  22   // 12×float min (48) + 12×float max (48) + magic(4) + crc(2) = 102 bytes
+
+// ============================================================
+// Offsets servo (EEPROM addr 124-177)
+// ============================================================
+#define SERVO_OFFSETS_MAGIC 0xDEADF00Dul
+#define EEPROM_OFFSETS_ADDR 124  // 12×float offset (48) + magic(4) + crc(2) = 54 bytes
 
 static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
@@ -79,13 +101,16 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.19"
+#define SKETCH_VERSION    "v0.2.20"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       500000
 #define IMU_PUBLISH_MS    50      // 20 Hz
 #define WATCHDOG_MS       3000
-#define JSON_BUFFER_SIZE  320
-#define SERVO_SPEED       1.0f    // deg/loop (~50 deg/s a 50Hz) — bon compromis visuel/securite
+#define JSON_BUFFER_SIZE  512     // augmenté pour get_limits / get_offsets
+#define SERVO_SPEED       1.0f    // deg/loop (~50 deg/s a 50Hz)
+
+// ArduinoJson documents (RX et TX séparés)
+StaticJsonDocument<512> rx_doc;
 
 // ---- Pins servos (D2-D13) ----
 const uint8_t SERVO_PINS[NUM_SERVOS] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
@@ -96,8 +121,7 @@ const uint8_t SERVO_PINS[NUM_SERVOS] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 #define BNO085_ADDR     0x4A
 
 // ---- HC-SR04 ----
-// Sonar optionnel — activable via #define
-#define SONAR_ENABLED false   // Mettre a true si le HC-SR04 est installe
+#define SONAR_ENABLED false
 #define SONAR_TRIG_PIN  22
 #define SONAR_ECHO_PIN  23
 #define SONAR_ALERT_CM  30.0f
@@ -108,8 +132,6 @@ const uint8_t SERVO_PINS[NUM_SERVOS] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 // ---- Positions servo ----
 const float SERVO_STAND[NUM_SERVOS] = {90,90,90, 90,90,90, 90,90,90, 90,90,90};
 const float SERVO_SIT[NUM_SERVOS]   = {90,120,60, 90,120,60, 90,120,60, 90,120,60};
-#define SERVO_MIN 0
-#define SERVO_MAX 180
 
 // ============================================================
 // Variables globales
@@ -117,35 +139,46 @@ const float SERVO_SIT[NUM_SERVOS]   = {90,120,60, 90,120,60, 90,120,60, 90,120,6
 Servo  servos[NUM_SERVOS];
 float  servo_targets[NUM_SERVOS];
 float  servo_current[NUM_SERVOS];
+
+// Limites individuelles (chargées depuis EEPROM ou valeur par défaut 0/180)
+float  servo_min_limit[NUM_SERVOS];
+float  servo_max_limit[NUM_SERVOS];
+
+// Offsets zero par servo (chargés depuis EEPROM ou 0.0)
+float  servo_offset[NUM_SERVOS];
+
 char   json_buf[JSON_BUFFER_SIZE];
 int    json_pos = 0;
 bool   bno_ok   = false;
 
 unsigned long last_cmd_ms  = 0;
 unsigned long last_imu_ms  = 0;
-bool          watchdog_mode = false;
-bool          servos_enabled = false;  // servos désactivés jusqu'à la 1ère commande
-bool          flag_capture_initial_pose = false;  // FIX NATIF: armé par resetBNO085(), consommé par readBNO085()
+bool          watchdog_mode  = false;
+bool          servos_enabled = false;
+bool          flag_capture_initial_pose = false;
 
-// FIX NATIF v6 : save distribué sur 22 loop() iterations (1 octet / itération).
-// Chaque EEPROM.write(~3.3ms) est entrecoupé d'une boucle entiere
-// (readSerial -> applyServos -> readBNO085 -> publishAll) donc le chip n'est JAMAIS
-// bloqué >3.3ms consecutifs, ce qui etait la cause des coupures brownout
-// mi-écriture qui laissaient les octets 8+ a 0xFF.
+// FIX NATIF v6 : save distribué IMU EEPROM
 uint8_t       save_buf[22];
-volatile uint8_t save_index = 0;  // 0 = inactif, 1..22 = octet en cours, >22 = terminé
+volatile uint8_t save_index = 0;
+
+// Save distribué pour les limites (102 bytes → 102 iterations)
+uint8_t        limits_save_buf[102];
+volatile uint8_t limits_save_index = 0;
+
+// Save distribué pour les offsets (54 bytes → 54 iterations)
+uint8_t        offsets_save_buf[54];
+volatile uint8_t offsets_save_index = 0;
 
 BNO08x bno;
 
 struct BnoData {
     float qw = 1, qx = 0, qy = 0, qz = 0;
-    float q_offset_w = 1, q_offset_x = 0, q_offset_y = 0, q_offset_z = 0;  // FIX NATIF
+    float q_offset_w = 1, q_offset_x = 0, q_offset_y = 0, q_offset_z = 0;
     float lax = 0, lay = 0, laz = 0;
     float gx = 0,  gy = 0,  gz = 0;
     uint8_t calib = 0;
 } bno_data;
 
-// Filtre sonar
 float sonar_history[SONAR_SAMPLES] = {0};
 int   sonar_idx   = 0;
 bool  sonar_valid = false;
@@ -153,35 +186,55 @@ unsigned long last_sonar_ms = 0;
 float cached_sonar_dist = -1.0f;
 
 // ============================================================
+// Prototypes
+// ============================================================
+void load_calibration_from_eeprom();
+void save_calibration_init();
+void load_limits_from_eeprom();
+void save_limits_init();
+void load_offsets_from_eeprom();
+void save_offsets_init();
+void resetBNO085();
+void clear_calibration_from_eeprom();
+void setStand();
+void setSit();
+void stopServos();
+void applyServos();
+void readSerial();
+void parseJSON(const char* json);
+void readBNO085();
+void publishAll(float dist_cm);
+void publishQuery();
+float readSonar();
+
+// ============================================================
 // Setup
 // ============================================================
 void setup() {
-    // ⚠️ URGENCE : forcer TOUS les pins servos à LOW IMMÉDIATEMENT
-    // pour éviter tout twitching parasite pendant le boot.
     for (int i = 0; i < NUM_SERVOS; i++) {
         pinMode(SERVO_PINS[i], OUTPUT);
         digitalWrite(SERVO_PINS[i], LOW);
         servo_targets[i] = SERVO_STAND[i];
         servo_current[i] = SERVO_STAND[i];
+        // Valeurs par défaut (0 / 180) — seront écrasées par EEPROM si disponible
+        servo_min_limit[i] = 0.0f;
+        servo_max_limit[i] = 180.0f;
+        servo_offset[i]    = 0.0f;
     }
-    delay(50);  // Stabilisation des signaux avant d'initialiser le reste
+    delay(50);
 
     Serial.begin(SERIAL_BAUD);
     delay(100);
 
-    // I2C — 400 kHz Fast Mode
     Wire.begin();
     Wire.setClock(400000);
 
-    // print debug
     Serial.println("{\"boot\":\"pre-init\"}");
     Serial.flush();
 
     // BNO085
     pinMode(BNO085_INT_PIN, INPUT_PULLUP);
     pinMode(BNO085_RST_PIN, OUTPUT);
-
-    // Hardware reset du BNO085 au démarrage pour éviter les freezes I2C
     digitalWrite(BNO085_RST_PIN, LOW);
     delay(50);
     digitalWrite(BNO085_RST_PIN, HIGH);
@@ -192,11 +245,15 @@ void setup() {
         bno.enableRotationVector(20);
         bno.enableLinearAccelerometer(20);
         bno.enableGyro(20);
-        load_calibration_from_eeprom();  // FIX NATIF : charge l'offset persistant depuis EEPROM
-        Serial.println("{\"boot\":\"SpotBot v3.1\",\"bno085\":true}");
+        load_calibration_from_eeprom();
+        Serial.println("{\"boot\":\"SpotBot v3.2\",\"bno085\":true}");
     } else {
-        Serial.println("{\"boot\":\"SpotBot v3.1\",\"bno085\":false,\"error\":\"BNO085 non detecte — verifiez I2C et adresse 0x4A\"}");
+        Serial.println("{\"boot\":\"SpotBot v3.2\",\"bno085\":false,\"error\":\"BNO085 non detecte\"}");
     }
+
+    // Charger limites et offsets depuis EEPROM
+    load_limits_from_eeprom();
+    load_offsets_from_eeprom();
 
     // HC-SR04
     pinMode(SONAR_TRIG_PIN, OUTPUT);
@@ -217,7 +274,6 @@ void loop() {
 
     if (!watchdog_mode && (millis() - last_cmd_ms) > WATCHDOG_MS) {
         watchdog_mode = true;
-        // Servos déjà libres si jamais activés, sinon on remet en stand
         if (servos_enabled) {
             setStand();
             Serial.println("{\"watchdog\":\"stand\"}");
@@ -229,7 +285,6 @@ void loop() {
     if (bno_ok) readBNO085();
 
 #if SONAR_ENABLED
-    // Sonar actif — lire et filtrer
     cached_sonar_dist = readSonar();
 #else
     cached_sonar_dist = -1.0f;
@@ -241,15 +296,36 @@ void loop() {
         publishAll(cached_sonar_dist);
     }
 
-    // FIX NATIF v6 : save distribué — 1 octet EEPROM.write par boucle.
-    // write_byte(): 1 octet + delay(0)-equivalent (rien), dure ~3.3ms.
+    // FIX NATIF v6 : save distribué IMU EEPROM (1 octet/boucle)
     if (save_index > 0 && save_index <= 22) {
         uint8_t idx = save_index - 1;
         EEPROM.update(EEPROM_CALIB_ADDR + idx, save_buf[idx]);
         save_index++;
         if (save_index > 22) {
-            save_index = 0;  // termine
-            Serial.println("{\"info\":\"EEPROM_PERSISTED\"}");
+            save_index = 0;
+            Serial.println("{\"info\":\"EEPROM_IMU_PERSISTED\"}");
+        }
+    }
+
+    // Save distribué limites servo (1 octet/boucle)
+    if (limits_save_index > 0 && limits_save_index <= 102) {
+        uint8_t idx = limits_save_index - 1;
+        EEPROM.update(EEPROM_LIMITS_ADDR + idx, limits_save_buf[idx]);
+        limits_save_index++;
+        if (limits_save_index > 102) {
+            limits_save_index = 0;
+            Serial.println("{\"info\":\"EEPROM_LIMITS_PERSISTED\"}");
+        }
+    }
+
+    // Save distribué offsets servo (1 octet/boucle)
+    if (offsets_save_index > 0 && offsets_save_index <= 54) {
+        uint8_t idx = offsets_save_index - 1;
+        EEPROM.update(EEPROM_OFFSETS_ADDR + idx, offsets_save_buf[idx]);
+        offsets_save_index++;
+        if (offsets_save_index > 54) {
+            offsets_save_index = 0;
+            Serial.println("{\"info\":\"EEPROM_OFFSETS_PERSISTED\"}");
         }
     }
 }
@@ -273,24 +349,18 @@ void readBNO085() {
             float sqx = bno.getQuatI();
             float sqy = bno.getQuatJ();
             float sqz = bno.getQuatK();
-            // Appliquer une rotation de 180° autour de X (IMU montée à l'envers sous le robot)
+            // Rotation 180° autour de X (IMU montée à l'envers)
             float post_w = sqx;
             float post_x = -sqw;
             float post_y = -sqz;
             float post_z = sqy;
 
-            // FIX NATIF : si resetBNO085() vient d'armer la capture, ancrer la pose
-            // post-X180 comme nouvel offset (avant le produit q_offset^-1 * q_post,
-            // sinon on composerait deux fois le meme quaternion et la calibration
-            // dériverait à chaque clic reset_imu).
             if (flag_capture_initial_pose) {
                 flag_capture_initial_pose = false;
                 bno_data.q_offset_w = post_w;
                 bno_data.q_offset_x = post_x;
                 bno_data.q_offset_y = post_y;
                 bno_data.q_offset_z = post_z;
-                // FIX NATIF v6 : init save_buf + save_index=1, la save reelle
-                // est faite en 22 iterations de loop() (1 octet / iter).
                 save_calibration_init();
                 Serial.print("{\"info\":\"CAPTURED q_offset=[\"");
                 Serial.print(post_w, 4); Serial.print(",");
@@ -299,9 +369,7 @@ void readBNO085() {
                 Serial.print(post_z, 4); Serial.println("]\"}");
             }
 
-            // FIX NATIF : appliquer q_offset^-1 * q_post (produit de Hamilton, ROS conv).
-            // Pour un quaternion unitaire, l'inverse = le conjugue (qw, -qx, -qy, -qz).
-            float oqw = bno_data.q_offset_w;
+            float oqw =  bno_data.q_offset_w;
             float oqx = -bno_data.q_offset_x;
             float oqy = -bno_data.q_offset_y;
             float oqz = -bno_data.q_offset_z;
@@ -353,102 +421,141 @@ void readSerial() {
 
 void parseJSON(const char* json) {
     int len = strlen(json);
-    while (len > 0 && (json[len - 1] == ' ' || json[len - 1] == '\t' || json[len - 1] == '\r' || json[len - 1] == '\n')) {
-        len--;
-    }
-    if (len < 2 || json[len - 1] != '}') {
-        return;
-    }
+    while (len > 0 && (json[len-1] == ' ' || json[len-1] == '\t' || json[len-1] == '\r')) len--;
+    if (len < 2 || json[len-1] != '}') return;
+
+    // FIX v3.2 : clear explicite avant chaque parse → élimine les micro-mouvements
+    // causés par des champs résiduels du message précédent dans le document statique.
+    rx_doc.clear();
+
+    DeserializationError err = deserializeJson(rx_doc, json, len);
+    if (err) return;
+
     last_cmd_ms   = millis();
     watchdog_mode = false;
-    if (strstr(json, "\"servos\""))       parseServos(json);
-    else if (strstr(json, "\"cmd\""))     parseCmd(json);
-}
 
-void parseServos(const char* json) {
-    const char* s = strchr(json, '[');
-    if (!s) return;
-    float angles[NUM_SERVOS]; int n = 0;
-    char* p = (char*)(s + 1);
-    while (n < NUM_SERVOS && *p && *p != ']') {
-        while (*p == ' ' || *p == ',') p++;
-        if (*p == ']') break;
-        angles[n++] = atof(p);
-        while (*p && *p != ',' && *p != ']') p++;
-    }
-    if (n == NUM_SERVOS) {
+    // ── {"servos": [90,90,...]}  (12 angles depuis le Pi, AVANT offset) ──
+    JsonArray arr = rx_doc["servos"].as<JsonArray>();
+    if (arr.size() == NUM_SERVOS) {
         servos_enabled = true;
         for (int i = 0; i < NUM_SERVOS; i++) {
             if (!servos[i].attached()) {
                 servos[i].attach(SERVO_PINS[i]);
-                servo_current[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+                servo_current[i] = constrain(arr[i].as<float>(), servo_min_limit[i], servo_max_limit[i]);
             }
-            servo_targets[i] = constrain(angles[i], SERVO_MIN, SERVO_MAX);
+            servo_targets[i] = constrain(arr[i].as<float>(), servo_min_limit[i], servo_max_limit[i]);
         }
+        return;
     }
-}
 
-float parseNumAfterKey(const char* json, const char* key) {
-    const char* p = strstr(json, key);
-    if (!p) return -999.0f;
-    p += strlen(key);
-    while (*p && (*p == ' ' || *p == ':' || *p == '"' || *p == '\t')) {
-        p++;
-    }
-    return atof(p);
-}
+    // ── {"cmd": "..."}  ──
+    const char* cmd = rx_doc["cmd"].as<const char*>();
+    if (!cmd) return;
 
-void parseCmd(const char* json) {
-    if (strstr(json, "\"stand\""))          setStand();
-    else if (strstr(json, "\"sit\""))       setSit();
-    else if (strstr(json, "\"stop\""))      stopServos();
-    else if (strstr(json, "\"reset_imu\"")) resetBNO085();
-    else if (strstr(json, "\"clear_calib\"")) clear_calibration_from_eeprom();  // FIX NATIF
-    else if (strstr(json, "\"attach\"")) {
-        float val = parseNumAfterKey(json, "\"index\"");
-        if (val != -999.0f) {
-            int idx = (int)val;
+    if (strcmp(cmd, "stand") == 0) {
+        setStand();
+    } else if (strcmp(cmd, "sit") == 0) {
+        setSit();
+    } else if (strcmp(cmd, "stop") == 0) {
+        stopServos();
+    } else if (strcmp(cmd, "reset_imu") == 0) {
+        resetBNO085();
+    } else if (strcmp(cmd, "clear_calib") == 0) {
+        clear_calibration_from_eeprom();
+    } else if (strcmp(cmd, "heartbeat") == 0) {
+        // keep-alive, no-op
+    } else if (strcmp(cmd, "attach") == 0) {
+        if (!rx_doc["index"].isNull()) {
+            int idx = rx_doc["index"].as<int>();
             if (idx >= 0 && idx < NUM_SERVOS) {
                 if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
                 servos_enabled = true;
             }
         }
-    }
-    else if (strstr(json, "\"detach\"")) {
-        float val = parseNumAfterKey(json, "\"index\"");
-        if (val != -999.0f) {
-            int idx = (int)val;
+    } else if (strcmp(cmd, "detach") == 0) {
+        if (!rx_doc["index"].isNull()) {
+            int idx = rx_doc["index"].as<int>();
             if (idx >= 0 && idx < NUM_SERVOS) {
                 servos[idx].detach();
                 pinMode(SERVO_PINS[idx], OUTPUT);
                 digitalWrite(SERVO_PINS[idx], LOW);
             }
         }
-    }
-    else if (strstr(json, "\"write\"")) {
-        float idx_val = parseNumAfterKey(json, "\"index\"");
-        float ang_val = parseNumAfterKey(json, "\"angle\"");
-        if (idx_val != -999.0f && ang_val != -999.0f) {
-            int idx = (int)idx_val;
-            float ang = ang_val;
+    } else if (strcmp(cmd, "write") == 0) {
+        if (!rx_doc["index"].isNull() && !rx_doc["angle"].isNull()) {
+            int idx   = rx_doc["index"].as<int>();
+            float ang = rx_doc["angle"].as<float>();
             if (idx >= 0 && idx < NUM_SERVOS) {
                 if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
-                servo_targets[idx] = constrain(ang, SERVO_MIN, SERVO_MAX);
+                servo_targets[idx] = constrain(ang, servo_min_limit[idx], servo_max_limit[idx]);
                 servos_enabled = true;
             }
         }
+
+    // ── Nouvelles commandes v3.2 ──
+
+    } else if (strcmp(cmd, "set_limit") == 0) {
+        // {"cmd":"set_limit","index":i,"min":x,"max":y}
+        if (!rx_doc["index"].isNull()) {
+            int idx = rx_doc["index"].as<int>();
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                if (!rx_doc["min"].isNull()) servo_min_limit[idx] = rx_doc["min"].as<float>();
+                if (!rx_doc["max"].isNull()) servo_max_limit[idx] = rx_doc["max"].as<float>();
+                // Clamp target courant dans les nouvelles limites
+                servo_targets[idx] = constrain(servo_targets[idx], servo_min_limit[idx], servo_max_limit[idx]);
+                save_limits_init();
+                Serial.print("{\"info\":\"limit_set\",\"index\":");
+                Serial.print(idx);
+                Serial.print(",\"min\":"); Serial.print(servo_min_limit[idx], 1);
+                Serial.print(",\"max\":"); Serial.print(servo_max_limit[idx], 1);
+                Serial.println("}");
+            }
+        }
+
+    } else if (strcmp(cmd, "get_limits") == 0) {
+        // Répondre avec toutes les limites
+        Serial.print("{\"limits\":[");
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            Serial.print("[");
+            Serial.print(servo_min_limit[i], 1);
+            Serial.print(",");
+            Serial.print(servo_max_limit[i], 1);
+            Serial.print("]");
+            if (i < NUM_SERVOS - 1) Serial.print(",");
+        }
+        Serial.println("]}");
+
+    } else if (strcmp(cmd, "set_offset") == 0) {
+        // {"cmd":"set_offset","index":i,"offset":x}
+        if (!rx_doc["index"].isNull() && !rx_doc["offset"].isNull()) {
+            int idx    = rx_doc["index"].as<int>();
+            float off  = rx_doc["offset"].as<float>();
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                servo_offset[idx] = off;
+                save_offsets_init();
+                Serial.print("{\"info\":\"offset_set\",\"index\":");
+                Serial.print(idx);
+                Serial.print(",\"offset\":"); Serial.print(off, 2);
+                Serial.println("}");
+            }
+        }
+
+    } else if (strcmp(cmd, "get_offsets") == 0) {
+        Serial.print("{\"offsets\":[");
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            Serial.print(servo_offset[i], 2);
+            if (i < NUM_SERVOS - 1) Serial.print(",");
+        }
+        Serial.println("]}");
+
+    } else if (strcmp(cmd, "query") == 0) {
+        publishQuery();
     }
 }
 
 // ============================================================
-// FIX NATIF : persistance + capture non-bloquante de la calibration IMU
+// EEPROM — IMU calibration
 // ============================================================
-// FIX NATIF v6 : prepare le buffer de persistance + arme la save distribuee.
-// loop() ecrit 1 octet / iteration sur 22 iterations (1 EEPROM.update de 3.3ms
-// reparti sur ~440ms via le cadencement naturel de loop()). 16+ms libres entre
-// chaque strobe pour les ISRs BNO085/Wire/Serial -> fini le brownout BNO085
-// mi-ecriture ; le CRC protege l'integrite des 22 octets a la lecture.
-// Format save_buf : magic[4] + q_offset_wxyz[16] + crc16[2], little-endian.
 void save_calibration_init() {
     save_buf[0] = (uint8_t)(BNO085_CALIB_MAGIC         & 0xFF);
     save_buf[1] = (uint8_t)((BNO085_CALIB_MAGIC >>  8) & 0xFF);
@@ -461,83 +568,122 @@ void save_calibration_init() {
     uint16_t crc = crc16_ccitt(save_buf, 20);
     save_buf[20] = (uint8_t)(crc & 0xFF);
     save_buf[21] = (uint8_t)((crc >> 8) & 0xFF);
-    save_index = 1;  // loop() ecrit byte[0] a la 1re iteration puis ++
+    save_index = 1;
 }
 
-// FIX NATIF v4 : evite EEPROM.get( struct ) pour la meme raison que save.
-// Lecture byte by byte dans un buffer RAM, puis memcpy des floats vers la
-// struct BnoData. Simple, deterministe, pas de packed template issue.
 void load_calibration_from_eeprom() {
     uint8_t buf[22];
-    for (uint8_t i = 0; i < 22; i++) {
-        buf[i] = EEPROM.read(EEPROM_CALIB_ADDR + i);
-    }
-    uint32_t magic =  (uint32_t)buf[0]
-                   | ((uint32_t)buf[1] << 8)
-                   | ((uint32_t)buf[2] << 16)
-                   | ((uint32_t)buf[3] << 24);
+    for (uint8_t i = 0; i < 22; i++) buf[i] = EEPROM.read(EEPROM_CALIB_ADDR + i);
+    uint32_t magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8)
+                   | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
     if (magic != BNO085_CALIB_MAGIC) {
-        // EEPROM vide (toutes les cases a 0xFF) ou jamais calibree -> identite
-        bno_data.q_offset_w = 1.0f;
-        bno_data.q_offset_x = 0.0f;
-        bno_data.q_offset_y = 0.0f;
-        bno_data.q_offset_z = 0.0f;
+        bno_data.q_offset_w = 1.0f; bno_data.q_offset_x = 0.0f;
+        bno_data.q_offset_y = 0.0f; bno_data.q_offset_z = 0.0f;
         return;
     }
     uint16_t expected = crc16_ccitt(buf, 20);
     uint16_t stored   = (uint16_t)buf[20] | ((uint16_t)buf[21] << 8);
     if (expected != stored) {
         Serial.println("{\"warn\":\"BNO085 EEPROM calibration CRC invalid - fallback identity\"}");
-        bno_data.q_offset_w = 1.0f;
-        bno_data.q_offset_x = 0.0f;
-        bno_data.q_offset_y = 0.0f;
-        bno_data.q_offset_z = 0.0f;
+        bno_data.q_offset_w = 1.0f; bno_data.q_offset_x = 0.0f;
+        bno_data.q_offset_y = 0.0f; bno_data.q_offset_z = 0.0f;
         return;
     }
-    memcpy(&bno_data.q_offset_w, buf + 4,  4);
-    memcpy(&bno_data.q_offset_x, buf + 8,  4);
+    memcpy(&bno_data.q_offset_w, buf +  4, 4);
+    memcpy(&bno_data.q_offset_x, buf +  8, 4);
     memcpy(&bno_data.q_offset_y, buf + 12, 4);
     memcpy(&bno_data.q_offset_z, buf + 16, 4);
-    Serial.print("{\"info\":\"EEPROM_LOADED q_offset=[\"");
-    Serial.print(bno_data.q_offset_w, 4); Serial.print(",");
-    Serial.print(bno_data.q_offset_x, 4); Serial.print(",");
-    Serial.print(bno_data.q_offset_y, 4); Serial.print(",");
-    Serial.print(bno_data.q_offset_z, 4); Serial.println("]\"}");
+    Serial.print("{\"info\":\"EEPROM_IMU_LOADED\"}");
 }
 
-// ============================================================
-// FIX NATIF v3 : calibration IMU = software-only, pas de reset hardware
-// ============================================================
-// fix v3 a supprime l'appel `bno.begin()` dans resetBNO085(). Chaque appel
-// re-initialisait la session SHTP du BNO085, ce qui pouvait faire taire le
-// chip (events jamais emis) et bloquer readBNO085() dans un getSensorEvent()
-// infini. Maintenant la calibration est strictement logicielle : on arme
-// juste `flag_capture_initial_pose=true`, et la PROCHAINE trame
-// SENSOR_REPORTID_ROTATION_VECTOR dans readBNO085() devient la nouvelle
-// pose de reference pour q_offset.
-// ============================================================
 void resetBNO085() {
     flag_capture_initial_pose = true;
     Serial.println("{\"info\":\"RESET_IMU_CMD_RECEIVED\"}");
-    Serial.println("{\"info\":\"BNO085 calibration-pending (soft capture on next Rotation Vector)\"}");
 }
 
-// Factory-reset : efface la calibration en EEPROM + force q_offset a identite
-// en RAM, sans toucher au hardware. Sert pour tests / debug.
 void clear_calibration_from_eeprom() {
-    bno_data.q_offset_w = 1.0f;
-    bno_data.q_offset_x = 0.0f;
-    bno_data.q_offset_y = 0.0f;
-    bno_data.q_offset_z = 0.0f;
+    bno_data.q_offset_w = 1.0f; bno_data.q_offset_x = 0.0f;
+    bno_data.q_offset_y = 0.0f; bno_data.q_offset_z = 0.0f;
     save_calibration_init();
-    Serial.println("{\"info\":\"BNO085 EEPROM calibration cleared (factory reset)\"}");
+    Serial.println("{\"info\":\"BNO085 EEPROM calibration cleared\"}");
 }
 
+// ============================================================
+// EEPROM — Limites servo (48+48+4+2 = 102 bytes)
+// ============================================================
+// Format save_buf : min[12×4] + max[12×4] + magic[4] + crc[2]
+void save_limits_init() {
+    for (int i = 0; i < 12; i++) memcpy(limits_save_buf + i*4,      &servo_min_limit[i], 4);
+    for (int i = 0; i < 12; i++) memcpy(limits_save_buf + 48 + i*4, &servo_max_limit[i], 4);
+    uint32_t magic = SERVO_LIMITS_MAGIC;
+    memcpy(limits_save_buf + 96, &magic, 4);
+    uint16_t crc = crc16_ccitt(limits_save_buf, 100);
+    limits_save_buf[100] = (uint8_t)(crc & 0xFF);
+    limits_save_buf[101] = (uint8_t)((crc >> 8) & 0xFF);
+    limits_save_index = 1;
+}
+
+void load_limits_from_eeprom() {
+    uint8_t buf[102];
+    for (int i = 0; i < 102; i++) buf[i] = EEPROM.read(EEPROM_LIMITS_ADDR + i);
+    uint32_t magic;
+    memcpy(&magic, buf + 96, 4);
+    if (magic != SERVO_LIMITS_MAGIC) {
+        // Pas encore configuré → valeurs par défaut (0/180), déjà initialisées dans setup()
+        Serial.println("{\"info\":\"EEPROM_LIMITS: no saved data, using defaults 0/180\"}");
+        return;
+    }
+    uint16_t expected = crc16_ccitt(buf, 100);
+    uint16_t stored   = (uint16_t)buf[100] | ((uint16_t)buf[101] << 8);
+    if (expected != stored) {
+        Serial.println("{\"warn\":\"EEPROM_LIMITS CRC invalid - fallback defaults\"}");
+        return;
+    }
+    for (int i = 0; i < 12; i++) memcpy(&servo_min_limit[i], buf + i*4,      4);
+    for (int i = 0; i < 12; i++) memcpy(&servo_max_limit[i], buf + 48 + i*4, 4);
+    Serial.println("{\"info\":\"EEPROM_LIMITS_LOADED\"}");
+}
+
+// ============================================================
+// EEPROM — Offsets servo (48+4+2 = 54 bytes)
+// ============================================================
+void save_offsets_init() {
+    for (int i = 0; i < 12; i++) memcpy(offsets_save_buf + i*4, &servo_offset[i], 4);
+    uint32_t magic = SERVO_OFFSETS_MAGIC;
+    memcpy(offsets_save_buf + 48, &magic, 4);
+    uint16_t crc = crc16_ccitt(offsets_save_buf, 52);
+    offsets_save_buf[52] = (uint8_t)(crc & 0xFF);
+    offsets_save_buf[53] = (uint8_t)((crc >> 8) & 0xFF);
+    offsets_save_index = 1;
+}
+
+void load_offsets_from_eeprom() {
+    uint8_t buf[54];
+    for (int i = 0; i < 54; i++) buf[i] = EEPROM.read(EEPROM_OFFSETS_ADDR + i);
+    uint32_t magic;
+    memcpy(&magic, buf + 48, 4);
+    if (magic != SERVO_OFFSETS_MAGIC) {
+        Serial.println("{\"info\":\"EEPROM_OFFSETS: no saved data, using zeros\"}");
+        return;
+    }
+    uint16_t expected = crc16_ccitt(buf, 52);
+    uint16_t stored   = (uint16_t)buf[52] | ((uint16_t)buf[53] << 8);
+    if (expected != stored) {
+        Serial.println("{\"warn\":\"EEPROM_OFFSETS CRC invalid - fallback zeros\"}");
+        return;
+    }
+    for (int i = 0; i < 12; i++) memcpy(&servo_offset[i], buf + i*4, 4);
+    Serial.println("{\"info\":\"EEPROM_OFFSETS_LOADED\"}");
+}
+
+// ============================================================
+// Postures
+// ============================================================
 void setStand() {
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
-        servo_targets[i] = SERVO_STAND[i];
+        servo_targets[i] = constrain(SERVO_STAND[i], servo_min_limit[i], servo_max_limit[i]);
     }
     Serial.println("{\"info\":\"stand\"}");
 }
@@ -545,7 +691,7 @@ void setSit() {
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
-        servo_targets[i] = SERVO_SIT[i];
+        servo_targets[i] = constrain(SERVO_SIT[i], servo_min_limit[i], servo_max_limit[i]);
     }
     Serial.println("{\"info\":\"sit\"}");
 }
@@ -558,6 +704,10 @@ void stopServos() {
     }
     Serial.println("{\"info\":\"servos_stopped\"}");
 }
+
+// ============================================================
+// Application des servos avec offset hardware
+// ============================================================
 void applyServos() {
     if (!servos_enabled) return;
     for (int i = 0; i < NUM_SERVOS; i++) {
@@ -568,7 +718,12 @@ void applyServos() {
             } else {
                 servo_current[i] += (diff > 0.0f ? SERVO_SPEED : -SERVO_SPEED);
             }
-            servos[i].write((int)servo_current[i]);
+            // Appliquer l'offset hardware : l'angle physique réel = cible + offset
+            // L'offset est défini lors de la calibration du zéro
+            // constrain avec les limites pour protection absolue
+            float physical = constrain(servo_current[i] + servo_offset[i],
+                                       servo_min_limit[i], servo_max_limit[i]);
+            servos[i].write((int)physical);
         }
     }
 }
@@ -593,7 +748,7 @@ float readSonar() {
 }
 
 // ============================================================
-// Publication JSON (BNO085 + Sonar)
+// Publication JSON principale (20 Hz)
 // ============================================================
 void publishAll(float dist_cm) {
     bool alert = sonar_valid && (dist_cm > 0) && (dist_cm < SONAR_ALERT_CM);
@@ -614,7 +769,45 @@ void publishAll(float dist_cm) {
     Serial.print("\"dist_cm\":"); Serial.print(dist_cm, 1);
     Serial.print(",\"valid\":"); Serial.print(sonar_valid ? "true" : "false");
     Serial.print(",\"alert\":"); Serial.print(alert ? "true" : "false");
-    Serial.print("},\"version\":\"");
+    // Inclure les positions courantes des servos (angle logique, sans offset)
+    Serial.print("},\"servos\":[");
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        Serial.print((int)servo_current[i]);
+        if (i < NUM_SERVOS - 1) Serial.print(",");
+    }
+    Serial.print("],\"version\":\"");
     Serial.print(SKETCH_VERSION);
     Serial.println("\"}");
+}
+
+// ============================================================
+// Réponse query — état complet
+// ============================================================
+void publishQuery() {
+    Serial.print("{\"query\":{\"servos\":[");
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        Serial.print((int)servo_current[i]);
+        if (i < NUM_SERVOS - 1) Serial.print(",");
+    }
+    Serial.print("],\"targets\":[");
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        Serial.print((int)servo_targets[i]);
+        if (i < NUM_SERVOS - 1) Serial.print(",");
+    }
+    Serial.print("],\"offsets\":[");
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        Serial.print(servo_offset[i], 2);
+        if (i < NUM_SERVOS - 1) Serial.print(",");
+    }
+    Serial.print("],\"limits\":[");
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        Serial.print("[");
+        Serial.print(servo_min_limit[i], 1);
+        Serial.print(",");
+        Serial.print(servo_max_limit[i], 1);
+        Serial.print("]");
+        if (i < NUM_SERVOS - 1) Serial.print(",");
+    }
+    Serial.print("],\"enabled\":"); Serial.print(servos_enabled ? "true" : "false");
+    Serial.println("}}");
 }
