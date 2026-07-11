@@ -47,6 +47,7 @@ class ROS2TelemetryListener(Node):
         self.pose_pub = self.create_publisher(String, '/cmd_pose', 10)
         self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        self.posture_pub = self.create_publisher(String, '/cmd_posture', 10)
         
         # Timer to print state to stdout as JSON (2 Hz)
         self.create_timer(0.5, self.publish_telemetry)
@@ -211,9 +212,17 @@ class ROS2TelemetryListener(Node):
                                 self.pose_pub.publish(pose_msg)
                                 self.get_logger().info(f"Pose cmd '{cmd}' transmise aussi a /cmd_pose pour motion_node")
                         self.motion_pub.publish(motion_msg)
+                elif msg_json.get("type") == "robot_posture":
+                    key = msg_json.get("key")
+                    value = msg_json.get("value")
+                    if key and value is not None:
+                        posture_msg = String()
+                        posture_msg.data = json.dumps({key: value})
+                        self.posture_pub.publish(posture_msg)
                 elif msg_json.get("type") == "cmd_vel":
                     twist = Twist()
                     twist.linear.x = float(msg_json.get("linear", 0.0))
+                    twist.linear.y = float(msg_json.get("lateral", 0.0))
                     twist.angular.z = float(msg_json.get("angular", 0.0))
                     self.vel_pub.publish(twist)
                 elif msg_json.get("type") == "nav_goal":

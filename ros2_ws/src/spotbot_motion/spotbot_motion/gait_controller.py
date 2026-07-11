@@ -102,6 +102,10 @@ class GaitController:
         self.offsets = self.PHASE_OFFSETS.get(gait, self.PHASE_OFFSETS['trot'])
         self.roll    = 0.0
         self.pitch   = 0.0
+        self.body_height_multiplier = 1.0
+        self.manual_roll = 0.0
+        self.manual_pitch = 0.0
+        self.manual_yaw = 0.0
 
     def set_gait(self, gait: str):
         """Change la demarche."""
@@ -116,49 +120,106 @@ class GaitController:
 
     def step(self, dt: float, vx: float = 0.0, vy: float = 0.0,
              omega: float = 0.0) -> list[float]:
-        """
-        Avance d'un pas de temps et calcule les 12 angles de servo.
-
-        Args:
-            dt:    delta temps [s]
-            vx:    vitesse avant [m/s] (normalise)
-            vy:    vitesse laterale [m/s] (normalise)
-            omega: vitesse de rotation [rad/s] (normalise)
-
-        Returns:
-            liste de 12 angles servos [deg]
-        """
         self.t += dt
         cycle_phase = (self.t * self.freq) % 1.0
+
+        h_nominal = SpotIK.STAND_HEIGHT * self.body_height_multiplier
+        total_roll = self.roll + self.manual_roll
+        total_pitch = self.pitch + self.manual_pitch
+        total_yaw = self.manual_yaw
+
+        cR, sR = math.cos(total_roll), math.sin(total_roll)
+        cP, sP = math.cos(total_pitch), math.sin(total_pitch)
+        cY, sY = math.cos(total_yaw), math.sin(total_yaw)
 
         foot_positions = {}
         for leg in ['fr', 'fl', 'br', 'bl']:
             phase = (cycle_phase + self.offsets[leg]) % 1.0
-            # Ajout de la composante de rotation (yaw)
             hip = SpotIK.HIP_POSITIONS[leg]
             rot_x = -omega * hip[1]
             rot_y =  omega * hip[0]
-            pos = self.bezier.foot_trajectory(phase,
-                                               vx + rot_x,
-                                               vy + rot_y)
-            # Stabilisation d'assiette active via IMU feedback
-            dz = -hip[0] * math.sin(self.pitch) - hip[1] * math.sin(self.roll)
-            # Limiter la compensation a +/- 3.5 cm pour eviter les saturations d'IK
-            dz = max(-0.035, min(0.035, dz))
-            pos[2] += dz
-            foot_positions[leg] = pos
+            
+            # Bezier trajectory
+            traj = self.bezier.foot_trajectory(phase, vx + rot_x, vy + rot_y)
+            gait_z = traj[2] - SpotIK.STAND_HEIGHT
+            gait_x = traj[0]
+            gait_y = traj[1]
+
+            # Foot in world space relative to body center:
+            foot_x = hip[0] + gait_x
+            foot_y = hip[1] + gait_y
+            foot_z = h_nominal + gait_z
+
+            # Hip rotated position (ZXY sequence):
+            hx, hy = hip[0], hip[1]
+            hx_rot = cY*cP*hx + (-sY*cR + cY*sP*sR)*hy
+            hy_rot = sY*cP*hx + (cY*cR + sY*sP*sR)*hy
+            hz_rot = -sP*hx + cP*sR*hy
+
+            # Vector from hip_world to foot_world:
+            w_dx = foot_x - hx_rot
+            w_dy = foot_y - hy_rot
+            w_dz = foot_z - hz_rot
+
+            # Unrotate this vector back to local body frame:
+            ux = cY*w_dx + sY*w_dy
+            uy = -sY*w_dx + cY*w_dy
+            uz = w_dz
+
+            px = cP*ux - sP*uz
+            py = uy
+            pz = sP*ux + cP*uz
+
+            lx = px
+            ly = cR*py + sR*pz
+            lz = -sR*py + cR*pz
+
+            foot_positions[leg] = np.array([lx, ly, lz])
 
         return self.ik.solve_for_feet(foot_positions)
 
     def stand(self, body_height: float = None) -> list[float]:
         """Retourne les angles position debout avec stabilisation active."""
-        h = body_height if body_height is not None else SpotIK.STAND_HEIGHT
+        h_nominal = (body_height if body_height is not None else SpotIK.STAND_HEIGHT) * self.body_height_multiplier
+        total_roll = self.roll + self.manual_roll
+        total_pitch = self.pitch + self.manual_pitch
+        total_yaw = self.manual_yaw
+
+        cR, sR = math.cos(total_roll), math.sin(total_roll)
+        cP, sP = math.cos(total_pitch), math.sin(total_pitch)
+        cY, sY = math.cos(total_yaw), math.sin(total_yaw)
+
         foot_positions = {}
         for leg in ['fr', 'fl', 'br', 'bl']:
             hip = SpotIK.HIP_POSITIONS[leg]
-            dz = -hip[0] * math.sin(self.pitch) - hip[1] * math.sin(self.roll)
-            dz = max(-0.035, min(0.035, dz))
-            foot_positions[leg] = np.array([0.0, 0.0, h + dz])
+
+            hx, hy = hip[0], hip[1]
+            hx_rot = cY*cP*hx + (-sY*cR + cY*sP*sR)*hy
+            hy_rot = sY*cP*hx + (cY*cR + sY*sP*sR)*hy
+            hz_rot = -sP*hx + cP*sR*hy
+
+            foot_x = hx
+            foot_y = hy
+            foot_z = h_nominal
+
+            w_dx = foot_x - hx_rot
+            w_dy = foot_y - hy_rot
+            w_dz = foot_z - hz_rot
+
+            ux = cY*w_dx + sY*w_dy
+            uy = -sY*w_dx + cY*w_dy
+            uz = w_dz
+
+            px = cP*ux - sP*uz
+            py = uy
+            pz = sP*ux + cP*uz
+
+            lx = px
+            ly = cR*py + sR*pz
+            lz = -sR*py + cR*pz
+
+            foot_positions[leg] = np.array([lx, ly, lz])
+
         return self.ik.solve_for_feet(foot_positions)
 
     def sit(self) -> list[float]:

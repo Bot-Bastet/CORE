@@ -58,7 +58,7 @@ class MotionNode(Node):
         self._vx    = 0.0
         self._vy    = 0.0
         self._omega = 0.0
-        self._mode  = 'stop'  # 'stand', 'walk', 'sit', 'stop'
+        self._mode  = 'idle'  # 'stand', 'walk', 'sit', 'stop', 'idle' — idle = no publishing
 
         # Variables d'odometrie
         self._odom_x = 0.0
@@ -80,6 +80,7 @@ class MotionNode(Node):
         self.create_subscription(Twist,  '/cmd_vel',  self._cmd_vel_cb,  10)
         self.create_subscription(String, '/cmd_gait', self._cmd_gait_cb, 10)
         self.create_subscription(String, '/cmd_pose', self._cmd_pose_cb, 10)
+        self.create_subscription(String, '/cmd_posture', self._cmd_posture_cb, 10)
         
         imu_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=10)
         self.create_subscription(Imu,    '/imu/data', self._imu_cb,      imu_qos)
@@ -112,10 +113,30 @@ class MotionNode(Node):
 
     def _cmd_pose_cb(self, msg: String):
         cmd = msg.data.lower().strip()
-        if cmd in ('stand', 'sit', 'stop'):
+        if cmd in ('stand', 'sit', 'stop', 'idle'):
             self._mode = cmd
             self._vx = self._vy = self._omega = 0.0
             self.get_logger().info(f'Pose: {cmd}')
+
+    def _cmd_posture_cb(self, msg: String):
+        import json
+        try:
+            data = json.loads(msg.data)
+            for k, v in data.items():
+                if k == "height":
+                    self._gait.body_height_multiplier = float(v) / 100.0
+                    self.get_logger().info(f"Manual Height set to {v}%")
+                elif k == "roll":
+                    self._gait.manual_roll = math.radians(float(v))
+                    self.get_logger().info(f"Manual Roll set to {v} deg")
+                elif k == "pitch":
+                    self._gait.manual_pitch = math.radians(float(v))
+                    self.get_logger().info(f"Manual Pitch set to {v} deg")
+                elif k == "yaw":
+                    self._gait.manual_yaw = math.radians(float(v))
+                    self.get_logger().info(f"Manual Yaw set to {v} deg")
+        except Exception as e:
+            self.get_logger().error(f"Error parsing posture: {e}")
 
     def _imu_cb(self, msg: Imu):
         import math
@@ -143,6 +164,10 @@ class MotionNode(Node):
         if self._mode == 'walk' and (time.time() - self._last_cmd_time) > 0.5:
             self._mode = 'stand'
             self._vx = self._vy = self._omega = 0.0
+
+        # IDLE mode: do NOT publish any joint angles (robot off, servos detached)
+        if self._mode in ('idle', 'stop'):
+            return
 
         # Calculer les angles
         if self._mode == 'walk':
