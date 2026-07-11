@@ -144,7 +144,7 @@ def detect_camera_change() -> dict:
     return result
 
 def get_active_video_devices() -> list:
-    fallback = ['/dev/video0', '/dev/video2']; out = set()
+    out = set()
     try:
         if os.path.isdir('/dev/v4l/by-id'):
             for entry in os.listdir('/dev/v4l/by-id'):
@@ -156,7 +156,7 @@ def get_active_video_devices() -> list:
                     if real.startswith('/dev/video'): out.add(real)
                 except OSError: continue
     except Exception: pass
-    return sorted(out) if out else sorted(set(fallback))
+    return sorted(out)
 
 def _json_calib_to_yaml(calib: dict) -> str:
     def fmt_num(x):
