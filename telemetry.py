@@ -134,6 +134,7 @@ def flash_arduino_task():
         if not _ensure_arduino_core(): report_arduino_progress("failed_no_core", 0); return
         _ensure_arduino_lib("SparkFun BNO08x Cortex Based IMU")
         _ensure_arduino_lib("Servo")
+        _ensure_arduino_lib("ArduinoJson")
         port = None
         try:
             import serial.tools.list_ports

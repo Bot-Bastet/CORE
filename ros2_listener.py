@@ -190,7 +190,7 @@ class ROS2TelemetryListener(Node):
                         motion_msg = String()
                         if cmd in ["attach", "detach", "write"]:
                             compact = {}
-                            for k in ["cmd", "index", "angle"]:
+                            for k in ["cmd", "index", "angle", "chk"]:
                                 if k in msg_json:
                                     compact[k] = msg_json[k]
                             motion_msg.data = json.dumps(compact)

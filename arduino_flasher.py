@@ -170,6 +170,7 @@ def flash_arduino_task():
         report_arduino_progress("installing_libs", 20)
         _ensure_arduino_lib("SparkFun BNO08x Cortex Based IMU")
         _ensure_arduino_lib("Servo")
+        _ensure_arduino_lib("ArduinoJson")
 
         report_arduino_progress("detecting_device", 25)
         port = None

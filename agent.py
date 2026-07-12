@@ -366,7 +366,25 @@ def start_websocket_client():
                                     if config.ros2_process and config.ros2_process.stdin:
                                         config.ros2_process.stdin.write(json.dumps(data) + "\n")
                                         config.ros2_process.stdin.flush()
-                                        
+
+                                elif msg_type == "cmd_vel":
+                                    # Forward D-pad walking commands to ros2_listener → motion_node
+                                    if config.ros2_process and config.ros2_process.stdin:
+                                        config.ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        config.ros2_process.stdin.flush()
+
+                                elif msg_type in ("nav_goal", "nav_path"):
+                                    # Forward navigation goals/paths to ros2_listener
+                                    if config.ros2_process and config.ros2_process.stdin:
+                                        config.ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        config.ros2_process.stdin.flush()
+
+                                elif msg_type == "robot_posture":
+                                    # Forward posture/gait updates to ros2_listener
+                                    if config.ros2_process and config.ros2_process.stdin:
+                                        config.ros2_process.stdin.write(json.dumps(data) + "\n")
+                                        config.ros2_process.stdin.flush()
+
                                 elif msg_type == "manual_joint_control":
                                     print("[Agent] Commande contrôle articulations reçue")
                                     if config.ros2_process and config.ros2_process.stdin:

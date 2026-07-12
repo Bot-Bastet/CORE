@@ -93,6 +93,15 @@ def run_mono_calib_thread(ws_ref, loop, data):
                     return
                 
                 if config.calibration_cancel_events[cam_id].is_set():
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            ws_ref.send(json.dumps({
+                                "type": "mono_calib_result", "camera": cam_id,
+                                "success": False, "message": "Calibration annulee."
+                            })), loop
+                        )
+                    except Exception:
+                        pass
                     return
                     
                 ret, frame = cap.read()
@@ -107,6 +116,24 @@ def run_mono_calib_thread(ws_ref, loop, data):
                 flags_cb = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
                 found, corners = cv2.findChessboardCorners(gray, pat, flags_cb)
                 
+                # Stream frame preview to client via Base64 JPEG
+                try:
+                    import base64
+                    frame_to_send = frame.copy()
+                    if found:
+                        cv2.drawChessboardCorners(frame_to_send, pat, corners, found)
+                    _, jpeg_buf = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    jpeg_b64 = base64.b64encode(jpeg_buf).decode('utf-8')
+                    asyncio.run_coroutine_threadsafe(
+                        ws_ref.send(json.dumps({
+                            "type": "mono_calib_frame",
+                            "camera": cam_id,
+                            "image": jpeg_b64
+                        })), loop
+                    )
+                except Exception as e_send_frame:
+                    print(f"Error sending calibration frame: {e_send_frame}")
+
                 if found:
                     found_any = True
                     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -326,6 +353,15 @@ def run_stereo_calib_thread(ws_ref, loop, data):
             found_any_s = False
             for attempt in range(num_pairs * 8):
                 if config.stereo_calibration_cancel_event.is_set():
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            ws_ref.send(json.dumps({
+                                "type": "stereo_calib_result",
+                                "success": False, "message": "Calibration annulee."
+                            })), loop
+                        )
+                    except Exception:
+                        pass
                     return
                 rl, fl = cap_l.read()
                 rr, fr = cap_r.read()
@@ -342,6 +378,27 @@ def run_stereo_calib_thread(ws_ref, loop, data):
                 fl_f, cl = cv2.findChessboardCorners(gl, pat, flags_cb)
                 fr_f, cr = cv2.findChessboardCorners(gr, pat, flags_cb)
                 
+                # Stream frame preview to client via Base64 JPEG
+                try:
+                    import base64
+                    fl_to_send = fl.copy()
+                    fr_to_send = fr.copy()
+                    if fl_f and fr_f:
+                        cv2.drawChessboardCorners(fl_to_send, pat, cl, fl_f)
+                        cv2.drawChessboardCorners(fr_to_send, pat, cr, fr_f)
+                    
+                    frame_to_send = np.hstack((fl_to_send, fr_to_send))
+                    _, jpeg_buf = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    jpeg_b64 = base64.b64encode(jpeg_buf).decode('utf-8')
+                    asyncio.run_coroutine_threadsafe(
+                        ws_ref.send(json.dumps({
+                            "type": "stereo_calib_frame",
+                            "image": jpeg_b64
+                        })), loop
+                    )
+                except Exception as e_send_frame:
+                    print(f"Error sending stereo calibration frame: {e_send_frame}")
+
                 if fl_f and fr_f:
                     found_any_s = True
                     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)

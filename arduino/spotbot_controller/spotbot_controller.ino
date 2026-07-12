@@ -87,6 +87,15 @@ static_assert(sizeof(EepromImuCalib) == 22, "EEPROM layout doit faire 22 octets"
 #define SERVO_OFFSETS_MAGIC 0xDEADF00Dul
 #define EEPROM_OFFSETS_ADDR 124  // 12×float offset (48) + magic(4) + crc(2) = 54 bytes
 
+// ============================================================
+// Inversion servo (EEPROM addr 178-195)
+// ============================================================
+// Flag par servo : 1 = inversé, 0 = normal
+// Quand inversé : angle_physique = (180 - cmd) + offset
+// Cela permet aux moteurs "miroir" (côté gauche vs droit) d'avoir la bonne direction
+#define SERVO_INVERTS_MAGIC 0xF00DBABEul
+#define EEPROM_INVERTS_ADDR 178  // 12×uint8 (12) + magic(4) + crc(2) = 18 bytes
+
 static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; i++) {
@@ -147,6 +156,10 @@ float  servo_max_limit[NUM_SERVOS];
 // Offsets zero par servo (chargés depuis EEPROM ou 0.0)
 float  servo_offset[NUM_SERVOS];
 
+// Flag d'inversion par servo (chargé depuis EEPROM ou false)
+// Quand true : angle physique = (180 - cmd) + offset
+bool   servo_inverted[NUM_SERVOS];
+
 char   json_buf[JSON_BUFFER_SIZE];
 int    json_pos = 0;
 bool   bno_ok   = false;
@@ -168,6 +181,10 @@ volatile uint8_t limits_save_index = 0;
 // Save distribué pour les offsets (54 bytes → 54 iterations)
 uint8_t        offsets_save_buf[54];
 volatile uint8_t offsets_save_index = 0;
+
+// Save distribué pour les inversions (18 bytes → 18 iterations)
+uint8_t        inverts_save_buf[18];
+volatile uint8_t inverts_save_index = 0;
 
 BNO08x bno;
 
@@ -194,6 +211,8 @@ void load_limits_from_eeprom();
 void save_limits_init();
 void load_offsets_from_eeprom();
 void save_offsets_init();
+void load_inverts_from_eeprom();
+void save_inverts_init();
 void resetBNO085();
 void clear_calibration_from_eeprom();
 void setStand();
@@ -216,10 +235,11 @@ void setup() {
         digitalWrite(SERVO_PINS[i], LOW);
         servo_targets[i] = SERVO_STAND[i];
         servo_current[i] = SERVO_STAND[i];
-        // Valeurs par défaut (0 / 180) — seront écrasées par EEPROM si disponible
+        // Valeurs par défaut — seront écrasées par EEPROM si disponible
         servo_min_limit[i] = 0.0f;
         servo_max_limit[i] = 180.0f;
         servo_offset[i]    = 0.0f;
+        servo_inverted[i]  = false;
     }
     delay(50);
 
@@ -251,9 +271,10 @@ void setup() {
         Serial.println("{\"boot\":\"SpotBot v3.2\",\"bno085\":false,\"error\":\"BNO085 non detecte\"}");
     }
 
-    // Charger limites et offsets depuis EEPROM
+    // Charger limites, offsets et inversions depuis EEPROM
     load_limits_from_eeprom();
     load_offsets_from_eeprom();
+    load_inverts_from_eeprom();
 
     // HC-SR04
     pinMode(SONAR_TRIG_PIN, OUTPUT);
@@ -326,6 +347,17 @@ void loop() {
         if (offsets_save_index > 54) {
             offsets_save_index = 0;
             Serial.println("{\"info\":\"EEPROM_OFFSETS_PERSISTED\"}");
+        }
+    }
+
+    // Save distribué inversions servo (1 octet/boucle)
+    if (inverts_save_index > 0 && inverts_save_index <= 18) {
+        uint8_t idx = inverts_save_index - 1;
+        EEPROM.update(EEPROM_INVERTS_ADDR + idx, inverts_save_buf[idx]);
+        inverts_save_index++;
+        if (inverts_save_index > 18) {
+            inverts_save_index = 0;
+            Serial.println("{\"info\":\"EEPROM_INVERTS_PERSISTED\"}");
         }
     }
 }
@@ -437,6 +469,20 @@ void parseJSON(const char* json) {
     // ── {"servos": [90,90,...]}  (12 angles depuis le Pi, AVANT offset) ──
     JsonArray arr = rx_doc["servos"].as<JsonArray>();
     if (arr.size() == NUM_SERVOS) {
+        // Validation du checksum pour prévenir les erreurs de transmission
+        if (!rx_doc["chk"].isNull()) {
+            int expected_chk = 0;
+            for (int i = 0; i < NUM_SERVOS; i++) {
+                expected_chk += (int)arr[i].as<float>();
+            }
+            expected_chk = expected_chk % 1000;
+            int actual_chk = rx_doc["chk"].as<int>();
+            if (expected_chk != actual_chk) {
+                Serial.println("{\"error\":\"servos_chk_failed\"}");
+                return;
+            }
+        }
+        
         servos_enabled = true;
         for (int i = 0; i < NUM_SERVOS; i++) {
             if (!servos[i].attached()) {
@@ -485,6 +531,17 @@ void parseJSON(const char* json) {
         if (!rx_doc["index"].isNull() && !rx_doc["angle"].isNull()) {
             int idx   = rx_doc["index"].as<int>();
             float ang = rx_doc["angle"].as<float>();
+            
+            // Validation du checksum de sécurité pour éviter les erreurs de transmission
+            if (!rx_doc["chk"].isNull()) {
+                int expected_chk = (idx + (int)ang) % 100;
+                int actual_chk = rx_doc["chk"].as<int>();
+                if (expected_chk != actual_chk) {
+                    Serial.println("{\"error\":\"write_chk_failed\"}");
+                    return;
+                }
+            }
+            
             if (idx >= 0 && idx < NUM_SERVOS) {
                 if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
                 servo_targets[idx] = constrain(ang, servo_min_limit[idx], servo_max_limit[idx]);
@@ -544,6 +601,29 @@ void parseJSON(const char* json) {
         Serial.print("{\"offsets\":[");
         for (int i = 0; i < NUM_SERVOS; i++) {
             Serial.print(servo_offset[i], 2);
+            if (i < NUM_SERVOS - 1) Serial.print(",");
+        }
+        Serial.println("]}");
+
+    } else if (strcmp(cmd, "set_invert") == 0) {
+        // {"cmd":"set_invert","index":i,"inverted":true/false}
+        if (!rx_doc["index"].isNull() && !rx_doc["inverted"].isNull()) {
+            int idx  = rx_doc["index"].as<int>();
+            bool inv = rx_doc["inverted"].as<bool>();
+            if (idx >= 0 && idx < NUM_SERVOS) {
+                servo_inverted[idx] = inv;
+                save_inverts_init();
+                Serial.print("{\"info\":\"invert_set\",\"index\":");
+                Serial.print(idx);
+                Serial.print(",\"inverted\":"); Serial.print(inv ? "true" : "false");
+                Serial.println("}");
+            }
+        }
+
+    } else if (strcmp(cmd, "get_inverts") == 0) {
+        Serial.print("{\"inverted\":[");
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            Serial.print(servo_inverted[i] ? "true" : "false");
             if (i < NUM_SERVOS - 1) Serial.print(",");
         }
         Serial.println("]}");
@@ -677,6 +757,39 @@ void load_offsets_from_eeprom() {
 }
 
 // ============================================================
+// EEPROM — Inversions servo (12+4+2 = 18 bytes)
+// ============================================================
+// Format : inverted[12]×uint8 + magic[4] + crc[2]
+void save_inverts_init() {
+    for (int i = 0; i < 12; i++) inverts_save_buf[i] = servo_inverted[i] ? 1 : 0;
+    uint32_t magic = SERVO_INVERTS_MAGIC;
+    memcpy(inverts_save_buf + 12, &magic, 4);
+    uint16_t crc = crc16_ccitt(inverts_save_buf, 16);
+    inverts_save_buf[16] = (uint8_t)(crc & 0xFF);
+    inverts_save_buf[17] = (uint8_t)((crc >> 8) & 0xFF);
+    inverts_save_index = 1;
+}
+
+void load_inverts_from_eeprom() {
+    uint8_t buf[18];
+    for (int i = 0; i < 18; i++) buf[i] = EEPROM.read(EEPROM_INVERTS_ADDR + i);
+    uint32_t magic;
+    memcpy(&magic, buf + 12, 4);
+    if (magic != SERVO_INVERTS_MAGIC) {
+        Serial.println("{\"info\":\"EEPROM_INVERTS: no saved data, all normal\"}");
+        return;
+    }
+    uint16_t expected = crc16_ccitt(buf, 16);
+    uint16_t stored   = (uint16_t)buf[16] | ((uint16_t)buf[17] << 8);
+    if (expected != stored) {
+        Serial.println("{\"warn\":\"EEPROM_INVERTS CRC invalid - fallback normal\"}");
+        return;
+    }
+    for (int i = 0; i < 12; i++) servo_inverted[i] = (buf[i] != 0);
+    Serial.println("{\"info\":\"EEPROM_INVERTS_LOADED\"}");
+}
+
+// ============================================================
 // Postures
 // ============================================================
 void setStand() {
@@ -706,8 +819,15 @@ void stopServos() {
 }
 
 // ============================================================
-// Application des servos avec offset hardware
+// Application des servos avec offset + inversion hardware
 // ============================================================
+// Ordre d'application :
+//   1. Interpolation vers la cible (SERVO_SPEED deg/loop)
+//   2. Inversion miroir si servo_inverted[i] = true : angle_inv = 180 - angle_courant
+//   3. Ajout de l'offset de calibration zéro
+//   4. Constrain dans [min_limit, max_limit]
+// Ainsi les commandes du Pi/URDF travaillent toujours dans un espace logique
+// cohérent (0-180° avec 90° = neutre) et l'Arduino corrige en hardware.
 void applyServos() {
     if (!servos_enabled) return;
     for (int i = 0; i < NUM_SERVOS; i++) {
@@ -718,10 +838,10 @@ void applyServos() {
             } else {
                 servo_current[i] += (diff > 0.0f ? SERVO_SPEED : -SERVO_SPEED);
             }
-            // Appliquer l'offset hardware : l'angle physique réel = cible + offset
-            // L'offset est défini lors de la calibration du zéro
-            // constrain avec les limites pour protection absolue
-            float physical = constrain(servo_current[i] + servo_offset[i],
+            // Inversion miroir (côté gauche/droit)
+            float logical = servo_inverted[i] ? (180.0f - servo_current[i]) : servo_current[i];
+            // Offset de calibration zéro
+            float physical = constrain(logical + servo_offset[i],
                                        servo_min_limit[i], servo_max_limit[i]);
             servos[i].write((int)physical);
         }

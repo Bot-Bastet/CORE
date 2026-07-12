@@ -306,23 +306,35 @@ class ArduinoBridgeNode(Node):
         norm = (qw**2 + qx**2 + qy**2 + qz**2) ** 0.5
         if norm > 1e-6:
             qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
+            
+        # Correction Roll/Yaw : swap X et Z (avec inversion de signe pour le repère direct)
+        # dû au montage vertical de l'IMU (rotation 90° autour de Y).
+        qx_corr = qz
+        qz_corr = -qx
+        
         msg.orientation.w = qw
-        msg.orientation.x = qx
+        msg.orientation.x = qx_corr
         msg.orientation.y = qy
-        msg.orientation.z = qz
+        msg.orientation.z = qz_corr
 
         calib = imu_raw.get('calib', 0)
         oc = {3: 0.0001, 2: 0.001, 1: 0.01, 0: 0.1}.get(calib, 0.01)
         msg.orientation_covariance = [oc, 0, 0, 0, oc, 0, 0, 0, oc]
 
-        msg.linear_acceleration.x = imu_raw.get('lax', 0) / 100.0
-        msg.linear_acceleration.y = imu_raw.get('lay', 0) / 100.0
-        msg.linear_acceleration.z = imu_raw.get('laz', 0) / 100.0
+        lax = imu_raw.get('lax', 0) / 100.0
+        lay = imu_raw.get('lay', 0) / 100.0
+        laz = imu_raw.get('laz', 0) / 100.0
+        msg.linear_acceleration.x = laz
+        msg.linear_acceleration.y = lay
+        msg.linear_acceleration.z = -lax
         msg.linear_acceleration_covariance = [0.005, 0, 0, 0, 0.005, 0, 0, 0, 0.005]
 
-        msg.angular_velocity.x = imu_raw.get('gx', 0) / 1000.0
-        msg.angular_velocity.y = imu_raw.get('gy', 0) / 1000.0
-        msg.angular_velocity.z = imu_raw.get('gz', 0) / 1000.0
+        gx = imu_raw.get('gx', 0) / 1000.0
+        gy = imu_raw.get('gy', 0) / 1000.0
+        gz = imu_raw.get('gz', 0) / 1000.0
+        msg.angular_velocity.x = gz
+        msg.angular_velocity.y = gy
+        msg.angular_velocity.z = -gx
         msg.angular_velocity_covariance = [0.0003, 0, 0, 0, 0.0003, 0, 0, 0, 0.0003]
 
         self._imu_pub.publish(msg)      # /imu/data     (orientation deja calibree firmware-side)
@@ -354,7 +366,8 @@ class ArduinoBridgeNode(Node):
     # ------------------------------------------------------------------
 
     def _joint_callback(self, msg: Float32MultiArray):
-        """Envoie les angles des 12 servos a l'Arduino avec application des offsets."""
+        """Envoie les angles des 12 servos a l'Arduino avec application des offsets.
+        Deduplication: ne re-envoie pas le meme payload que le precedent."""
         if not self._connected:
             return
         angles = list(msg.data)[:12]
@@ -363,11 +376,17 @@ class ArduinoBridgeNode(Node):
         # Appliquer les offsets de calibration
         for i in range(12):
             angles[i] += self._offsets[i]
-            
-        payload = json.dumps({'servos': [round(a, 1) for a in angles]}) + '\n'
-        if not hasattr(self, '_last_servos_payload') or self._last_servos_payload != payload:
-            self._last_servos_payload = payload
-            self.get_logger().info(f"Envoi au port série de l'Arduino (servos) : {payload.strip()}")
+
+        rounded = [round(a, 1) for a in angles]
+
+        # Dedup: skip if same as last sent payload
+        if hasattr(self, '_last_servo_angles') and self._last_servo_angles == rounded:
+            return
+        self._last_servo_angles = rounded
+        
+        # Calcul du checksum de sécurité (somme des angles modulo 1000)
+        chk = sum(int(a) for a in rounded) % 1000
+        payload = json.dumps({'servos': rounded, 'chk': chk}) + '\n'
         self._send(payload)
 
     def _calib_callback(self, msg: Float32MultiArray):
@@ -389,6 +408,18 @@ class ArduinoBridgeNode(Node):
             return
         data = msg.data.strip()
         if data.startswith('{') and data.endswith('}'):
+            # C'est un message JSON (ex: écriture servo individuelle)
+            try:
+                js = json.loads(data)
+                # Si c'est une commande 'write' et qu'il n'y a pas de checksum, on le calcule et l'ajoute
+                if js.get("cmd") == "write" and "chk" not in js:
+                    idx = js.get("index")
+                    angle = js.get("angle")
+                    if idx is not None and angle is not None:
+                        js["chk"] = (int(idx) + int(angle)) % 100
+                        data = json.dumps(js)
+            except Exception:
+                pass
             payload = data + '\n'
         else:
             payload = json.dumps({'cmd': data}) + '\n'
