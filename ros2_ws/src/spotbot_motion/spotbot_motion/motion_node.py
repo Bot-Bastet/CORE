@@ -96,6 +96,10 @@ class MotionNode(Node):
     # ------------------------------------------------------------------
 
     def _cmd_vel_cb(self, msg: Twist):
+        # Si le robot est éteint ou stoppé (idle / stop), on ignore les commandes de vitesse et on ne change pas de mode
+        if self._mode in ('idle', 'stop'):
+            return
+
         max_s = self._max_speed
         self._vx    = max(-max_s, min(max_s, msg.linear.x))
         self._vy    = max(-max_s, min(max_s, msg.linear.y))
