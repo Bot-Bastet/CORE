@@ -442,12 +442,14 @@ class ArduinoBridgeNode(Node):
     def _save_arduino_version(self, version: str):
         try:
             version_file = Path("/opt/spotbot/arduino_version.txt")
-            if not version_file.exists() or version_file.read_text().strip() != version:
+            curr_val = version_file.read_text().strip() if version_file.exists() else None
+            self.get_logger().info(f"DEBUG VERSION: exists={version_file.exists()} file_val={repr(curr_val)} recv_val={repr(version)} neq={curr_val != version}")
+            if not version_file.exists() or curr_val != version:
                 version_file.parent.mkdir(parents=True, exist_ok=True)
                 version_file.write_text(version)
                 self.get_logger().info(f"Version de l'Arduino detectee et mise a jour : {version}")
-        except Exception:
-            pass
+        except Exception as e:
+            self.get_logger().error(f"DEBUG VERSION ERROR: {e}")
 
 
     def _send_heartbeat(self):
