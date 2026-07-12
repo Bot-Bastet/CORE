@@ -54,6 +54,7 @@ class MotionNode(Node):
 
         self._gait = GaitController(gait=gait, freq=freq)
         self._dt   = 1.0 / rate
+        self._use_imu_stab = False
 
         self._vx    = 0.0
         self._vy    = 0.0
@@ -139,12 +140,21 @@ class MotionNode(Node):
                 elif k == "yaw":
                     self._gait.manual_yaw = math.radians(float(v))
                     self.get_logger().info(f"Manual Yaw set to {v} deg")
+                elif k == "imu_stab":
+                    self._use_imu_stab = bool(v)
+                    self.get_logger().info(f"Stabilisation IMU (Autopilote) set to {self._use_imu_stab}")
         except Exception as e:
             self.get_logger().error(f"Error parsing posture: {e}")
 
     def _imu_cb(self, msg: Imu):
         import math
         q = msg.orientation
+        
+        # Si la stabilisation IMU (Autopilote) est désactivée, on remet les offsets IMU à 0
+        if not getattr(self, '_use_imu_stab', False):
+            self._gait.set_imu_feedback(0.0, 0.0)
+            return
+
         # Calcul du roulis (roll, rotation axe X)
         sinr_cosp = 2 * (q.w * q.x + q.y * q.z)
         cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y)
