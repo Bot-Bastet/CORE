@@ -268,6 +268,8 @@ class ArduinoBridgeNode(Node):
             if line.strip():
                 self.get_logger().warn(f"Ligne non-JSON reçue de l'Arduino: {line}")
             return
+        
+        self.get_logger().info(f"DEBUG PARSE: keys={list(data.keys())}")
 
         if 'imu' not in data and 'sonar' not in data and 'version' not in data:
             self.get_logger().info(f"Message reçu de l'Arduino: {line}")
