@@ -27,23 +27,18 @@ def is_arduino_connected() -> bool:
     return False
 
 def get_arduino_version() -> str:
-    robot_ver = config.get_version()
+    """Return the Arduino firmware version stored by the bridge node.
+
+    Do NOT overwrite the file here: the bridge node is the authoritative
+    source and writes the version after reading it from the Arduino serial
+    port. Overwriting it with the robot version causes stale/false reports.
+    """
     if ARDUINO_VERSION_FILE.exists():
         try:
-            arduino_ver = ARDUINO_VERSION_FILE.read_text().strip()
-            if robot_ver != arduino_ver:
-                print(f"[Agent] Sync Arduino version: {arduino_ver} -> {robot_ver}")
-                ARDUINO_VERSION_FILE.write_text(robot_ver)
-                return robot_ver
-            return arduino_ver
+            return ARDUINO_VERSION_FILE.read_text().strip()
         except Exception:
             pass
-    try:
-        ARDUINO_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ARDUINO_VERSION_FILE.write_text(robot_ver)
-    except Exception:
-        pass
-    return robot_ver
+    return "v0.0.0"
 
 def report_arduino_progress(status: str, percent: int):
     try:

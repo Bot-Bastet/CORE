@@ -110,7 +110,7 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.21"
+#define SKETCH_VERSION    "v0.2.22"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       250000
 #define IMU_PUBLISH_MS    50      // 20 Hz
@@ -502,10 +502,8 @@ void parseJSON(const char* json) {
             is_manual = rx_doc["manual"].as<bool>();
         }
         if (!is_manual && (!offsets_calibrated || !limits_calibrated)) {
-            // Moteurs non calibrés et commande non manuelle -> on force l'arrêt par sécurité
-            if (servos_enabled) {
-                stopServos();
-            }
+            // Moteurs non calibrés et commande non manuelle -> on ignore silencieusement
+            // pour ne pas détacher les servos actifs en mode manuel (EasyConfig / testeur).
             return;
         }
         
