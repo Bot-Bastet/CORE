@@ -32,7 +32,7 @@
  *   },
  *   "sonar":{"dist_cm":42.5,"valid":true,"alert":false},
  *   "servos":[90,90,...],               ← 12 angles courants (degrés bruts, sans offset)
- *   "version":"v0.2.20"
+ *   "version":"v0.2.21"
  * }
  *
  * JSON recu:
@@ -110,9 +110,9 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.20"
+#define SKETCH_VERSION    "v0.2.21"
 #define NUM_SERVOS        12
-#define SERIAL_BAUD       500000
+#define SERIAL_BAUD       250000
 #define IMU_PUBLISH_MS    50      // 20 Hz
 #define WATCHDOG_MS       3000
 #define JSON_BUFFER_SIZE  512     // augmenté pour get_limits / get_offsets
@@ -159,6 +159,8 @@ float  servo_offset[NUM_SERVOS];
 // Flag d'inversion par servo (chargé depuis EEPROM ou false)
 // Quand true : angle physique = (180 - cmd) + offset
 bool   servo_inverted[NUM_SERVOS];
+bool   offsets_calibrated = false;
+bool   limits_calibrated = false;
 
 char   json_buf[JSON_BUFFER_SIZE];
 int    json_pos = 0;
@@ -296,8 +298,17 @@ void loop() {
     if (!watchdog_mode && (millis() - last_cmd_ms) > WATCHDOG_MS) {
         watchdog_mode = true;
         if (servos_enabled) {
-            setStand();
-            Serial.println("{\"watchdog\":\"stand\"}");
+            // 🔴 SAFETY: If motors are not calibrated, DETACH all servos
+            // instead of trying to stand. This prevents the robot from
+            // moving to a random position when communication is lost
+            // and calibration has not been configured.
+            if (offsets_calibrated && limits_calibrated) {
+                setStand();
+                Serial.println("{\"watchdog\":\"stand\"}");
+            } else {
+                stopServos();
+                Serial.println("{\"watchdog\":\"stop_uncalibrated\"}");
+            }
         }
     }
 
@@ -335,6 +346,7 @@ void loop() {
         limits_save_index++;
         if (limits_save_index > 102) {
             limits_save_index = 0;
+            limits_calibrated = true;
             Serial.println("{\"info\":\"EEPROM_LIMITS_PERSISTED\"}");
         }
     }
@@ -346,6 +358,7 @@ void loop() {
         offsets_save_index++;
         if (offsets_save_index > 54) {
             offsets_save_index = 0;
+            offsets_calibrated = true;
             Serial.println("{\"info\":\"EEPROM_OFFSETS_PERSISTED\"}");
         }
     }
@@ -483,6 +496,19 @@ void parseJSON(const char* json) {
             }
         }
         
+        // Bloquer si non calibré SAUF si c'est explicitement marqué "manual": true
+        bool is_manual = false;
+        if (!rx_doc["manual"].isNull()) {
+            is_manual = rx_doc["manual"].as<bool>();
+        }
+        if (!is_manual && (!offsets_calibrated || !limits_calibrated)) {
+            // Moteurs non calibrés et commande non manuelle -> on force l'arrêt par sécurité
+            if (servos_enabled) {
+                stopServos();
+            }
+            return;
+        }
+        
         servos_enabled = true;
         for (int i = 0; i < NUM_SERVOS; i++) {
             if (!servos[i].attached()) {
@@ -499,8 +525,10 @@ void parseJSON(const char* json) {
     if (!cmd) return;
 
     if (strcmp(cmd, "stand") == 0) {
+        if (!offsets_calibrated || !limits_calibrated) return;
         setStand();
     } else if (strcmp(cmd, "sit") == 0) {
+        if (!offsets_calibrated || !limits_calibrated) return;
         setSit();
     } else if (strcmp(cmd, "stop") == 0) {
         stopServos();
@@ -508,9 +536,36 @@ void parseJSON(const char* json) {
         resetBNO085();
     } else if (strcmp(cmd, "clear_calib") == 0) {
         clear_calibration_from_eeprom();
+    } else if (strcmp(cmd, "clear_servo_calib") == 0) {
+        // Erase magic numbers for offsets and limits in EEPROM to reset calibration state
+        EEPROM.write(EEPROM_LIMITS_ADDR + 96, 0);
+        EEPROM.write(EEPROM_LIMITS_ADDR + 97, 0);
+        EEPROM.write(EEPROM_LIMITS_ADDR + 98, 0);
+        EEPROM.write(EEPROM_LIMITS_ADDR + 99, 0);
+        EEPROM.write(EEPROM_OFFSETS_ADDR + 48, 0);
+        EEPROM.write(EEPROM_OFFSETS_ADDR + 49, 0);
+        EEPROM.write(EEPROM_OFFSETS_ADDR + 50, 0);
+        EEPROM.write(EEPROM_OFFSETS_ADDR + 51, 0);
+        offsets_calibrated = false;
+        limits_calibrated = false;
+        // 🔴 CRITICAL: Immediately detach all servos to prevent any movement
+        // when calibration is cleared. Without this, servos remain attached
+        // at their current position and the watchdog could re-activate them.
+        stopServos();
+        Serial.println("{\"info\":\"Servo calibration cleared, safety interlock active\"}");
     } else if (strcmp(cmd, "heartbeat") == 0) {
         // keep-alive, no-op
     } else if (strcmp(cmd, "attach") == 0) {
+        // 🔴 CRITICAL: check calibration before allowing manual attach
+        // Only allow if offsets are calibrated OR explicitly marked as manual (servo tester / easyconfig)
+        bool is_manual = false;
+        if (!rx_doc["manual"].isNull()) {
+            is_manual = rx_doc["manual"].as<bool>();
+        }
+        if (!is_manual && (!offsets_calibrated || !limits_calibrated)) {
+            Serial.println("{\"error\":\"attach_blocked_calibration_required\"}");
+            return;
+        }
         if (!rx_doc["index"].isNull()) {
             int idx = rx_doc["index"].as<int>();
             if (idx >= 0 && idx < NUM_SERVOS) {
@@ -531,6 +586,17 @@ void parseJSON(const char* json) {
         if (!rx_doc["index"].isNull() && !rx_doc["angle"].isNull()) {
             int idx   = rx_doc["index"].as<int>();
             float ang = rx_doc["angle"].as<float>();
+            
+            // 🔴 CRITICAL: check calibration before allowing manual servo write
+            // Only allow if offsets are calibrated OR explicitly marked as manual
+            bool is_manual = false;
+            if (!rx_doc["manual"].isNull()) {
+                is_manual = rx_doc["manual"].as<bool>();
+            }
+            if (!is_manual && (!offsets_calibrated || !limits_calibrated)) {
+                Serial.println("{\"error\":\"write_blocked_calibration_required\"}");
+                return;
+            }
             
             // Validation du checksum de sécurité pour éviter les erreurs de transmission
             if (!rx_doc["chk"].isNull()) {
@@ -710,17 +776,20 @@ void load_limits_from_eeprom() {
     memcpy(&magic, buf + 96, 4);
     if (magic != SERVO_LIMITS_MAGIC) {
         // Pas encore configuré → valeurs par défaut (0/180), déjà initialisées dans setup()
+        limits_calibrated = false;
         Serial.println("{\"info\":\"EEPROM_LIMITS: no saved data, using defaults 0/180\"}");
         return;
     }
     uint16_t expected = crc16_ccitt(buf, 100);
     uint16_t stored   = (uint16_t)buf[100] | ((uint16_t)buf[101] << 8);
     if (expected != stored) {
+        limits_calibrated = false;
         Serial.println("{\"warn\":\"EEPROM_LIMITS CRC invalid - fallback defaults\"}");
         return;
     }
     for (int i = 0; i < 12; i++) memcpy(&servo_min_limit[i], buf + i*4,      4);
     for (int i = 0; i < 12; i++) memcpy(&servo_max_limit[i], buf + 48 + i*4, 4);
+    limits_calibrated = true;
     Serial.println("{\"info\":\"EEPROM_LIMITS_LOADED\"}");
 }
 
@@ -743,16 +812,19 @@ void load_offsets_from_eeprom() {
     uint32_t magic;
     memcpy(&magic, buf + 48, 4);
     if (magic != SERVO_OFFSETS_MAGIC) {
+        offsets_calibrated = false;
         Serial.println("{\"info\":\"EEPROM_OFFSETS: no saved data, using zeros\"}");
         return;
     }
     uint16_t expected = crc16_ccitt(buf, 52);
     uint16_t stored   = (uint16_t)buf[52] | ((uint16_t)buf[53] << 8);
     if (expected != stored) {
+        offsets_calibrated = false;
         Serial.println("{\"warn\":\"EEPROM_OFFSETS CRC invalid - fallback zeros\"}");
         return;
     }
     for (int i = 0; i < 12; i++) memcpy(&servo_offset[i], buf + i*4, 4);
+    offsets_calibrated = true;
     Serial.println("{\"info\":\"EEPROM_OFFSETS_LOADED\"}");
 }
 
@@ -793,6 +865,7 @@ void load_inverts_from_eeprom() {
 // Postures
 // ============================================================
 void setStand() {
+    if (!offsets_calibrated || !limits_calibrated) return;
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
@@ -801,6 +874,7 @@ void setStand() {
     Serial.println("{\"info\":\"stand\"}");
 }
 void setSit() {
+    if (!offsets_calibrated || !limits_calibrated) return;
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
