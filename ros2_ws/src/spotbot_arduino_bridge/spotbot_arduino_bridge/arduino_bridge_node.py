@@ -20,6 +20,7 @@ import json
 import time
 import glob
 import struct
+import threading
 from pathlib import Path
 
 import rclpy
@@ -41,7 +42,7 @@ except ImportError:
 class ArduinoBridgeNode(Node):
     """ROS 2 node bridging Pi 5 <-> Arduino Mega via USB Serial (JSON protocol)."""
 
-    BAUDRATE       = 115200
+    BAUDRATE       = 250000  # must match SERIAL_BAUD in Arduino firmware (250000)
     READ_TIMEOUT   = 0.05
     RETRY_INTERVAL = 3.0
     IMU_FRAME      = 'imu_link'
@@ -70,6 +71,8 @@ class ArduinoBridgeNode(Node):
         self._sonar_pub    = self.create_publisher(Range,  '/sensors/ultrasonic', qos)
         self._obstacle_pub = self.create_publisher(Bool,   '/sensors/obstacle',    10)
         self._status_pub   = self.create_publisher(String, '/arduino/status',      10)
+        # Publisher for real Arduino servo positions (20 Hz from firmware)
+        self._servo_pos_pub = self.create_publisher(Float32MultiArray, '/arduino/servo_positions', 10)
 
         # Frame du capteur ultrason (front du robot)
         self.SONAR_FRAME    = 'sonar_link'
@@ -81,6 +84,10 @@ class ArduinoBridgeNode(Node):
         self.create_subscription(
             Float32MultiArray, '/cmd_joint_angles',
             self._joint_callback, 10
+        )
+        self.create_subscription(
+            Float32MultiArray, '/cmd_manual_joint_angles',
+            self._manual_joint_callback, 10
         )
         self.create_subscription(
             String, '/cmd_motion',
@@ -111,6 +118,11 @@ class ArduinoBridgeNode(Node):
         self._serial: serial.Serial | None = None
         self._connected = False
         self._last_retry = 0.0
+        self._calib_synced = False
+        self._consecutive_json_errors = 0
+        self._max_json_errors_before_flush = 50
+        self._consecutive_read_errors = 0
+        self._max_read_errors_before_reconnect = 20
 
         # (FIX NATIF v2 : gestionnaire de calibration IMU retiré — l'Arduino gère
         # désormais la persistance et le calcul d'offset dans son firmware.)
@@ -179,16 +191,15 @@ class ArduinoBridgeNode(Node):
 
         try:
             self._serial = serial.Serial(port, self._baudrate, timeout=self.READ_TIMEOUT)
-            # Reset hardware de l'Arduino Mega
-            self._serial.dtr = False
-            self._serial.rts = False
-            time.sleep(0.5)
-            self._serial.dtr = True
-            self._serial.rts = True
-            time.sleep(2.5)  # Attendre reset Arduino et fin du bootloader
+            # Ne PAS faire de reset hardware (DTR) — l'Arduino tourne deja.
+            # Le reset provoque 2s de bootloader → garbage → crash → boucle infinie.
             self._serial.reset_input_buffer()
+            self._serial.reset_output_buffer()
             self._connected = True
-            self.get_logger().info(f'Arduino connecte sur {port} @ {self._baudrate} baud')
+            self._calib_synced = False
+            self._consecutive_json_errors = 0
+            self._consecutive_read_errors = 0
+            self.get_logger().info(f'Arduino connecte sur {port} @ {self._baudrate} baud (sans reset)')
             self._publish_status(f'connected:{port}')
 
             # Flash si demande
@@ -247,11 +258,37 @@ class ArduinoBridgeNode(Node):
             if self._serial.in_waiting:
                 line = self._serial.readline().decode('utf-8', errors='ignore').strip()
                 if line:
-                    # self.get_logger().info(f'RAW LINE: {line}')  # Supprimé pour éviter la surcharge de logging
+                    self._consecutive_read_errors = 0  # reset on successful read
+                    if not self._calib_synced:
+                        self._calib_synced = True
+                        threading.Thread(target=self._sync_calibration_to_arduino, daemon=True).start()
                     self._parse_line(line)
-        except (serial.SerialException, OSError, Exception) as e:
+        except (serial.SerialException, OSError) as e:
+            self._consecutive_read_errors += 1
+            if self._consecutive_read_errors >= self._max_read_errors_before_reconnect:
+                self.get_logger().error(
+                    f'{self._consecutive_read_errors} erreurs lecture consecutives — '
+                    'tentative reconnexion Arduino'
+                )
+                self._connected = False
+                self._consecutive_read_errors = 0
+                try:
+                    if self._serial:
+                        self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
+                self._publish_status('disconnected')
+            else:
+                try:
+                    if self._serial and self._serial.is_open:
+                        self._serial.reset_input_buffer()
+                except Exception:
+                    pass
+        except Exception as e:
             self.get_logger().error(f'Perte connexion Arduino: {e}')
             self._connected = False
+            self._consecutive_read_errors = 0
             try:
                 if self._serial:
                     self._serial.close()
@@ -264,9 +301,23 @@ class ArduinoBridgeNode(Node):
         """Decode une ligne JSON venant de l'Arduino v3.0 (BNO085 ou MPU6050)."""
         try:
             data = json.loads(line)
+            self._consecutive_json_errors = 0  # reset counter on success
         except json.JSONDecodeError:
-            if line.strip():
-                self.get_logger().warn(f"Ligne non-JSON reçue de l'Arduino: {line}")
+            self._consecutive_json_errors += 1
+            if self._consecutive_json_errors >= self._max_json_errors_before_flush:
+                self.get_logger().error(
+                    f"{self._consecutive_json_errors} erreurs JSON consecutives — "
+                    "flush du buffer serie (corruption detectee)"
+                )
+                try:
+                    if self._serial and self._serial.is_open:
+                        self._serial.reset_input_buffer()
+                except Exception:
+                    pass
+                self._consecutive_json_errors = 0
+            elif self._consecutive_json_errors == 1:
+                if line.strip():
+                    self.get_logger().warn(f"Ligne non-JSON reçue de l'Arduino: {line[:80]}")
             return
 
         if 'imu' not in data and 'sonar' not in data and 'version' not in data:
@@ -274,6 +325,16 @@ class ArduinoBridgeNode(Node):
 
         if 'imu' in data:
             self._publish_imu_bno085(data['imu'])
+
+        if 'servos' in data and isinstance(data['servos'], list):
+            # Forward real Arduino servo positions to ROS2 for telemetry
+            try:
+                angles = [float(a) for a in data['servos'][:12]]
+                msg = Float32MultiArray()
+                msg.data = angles
+                self._servo_pos_pub.publish(msg)
+            except Exception:
+                pass
 
         if 'status' in data and data.get('bno085') is False:
             self.get_logger().error('BNO085 non detecte sur l\'Arduino! Verifiez I2C (0x4A) et les cables.')
@@ -307,34 +368,23 @@ class ArduinoBridgeNode(Node):
         if norm > 1e-6:
             qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
             
-        # Correction Roll/Yaw : swap X et Z (avec inversion de signe pour le repère direct)
-        # dû au montage vertical de l'IMU (rotation 90° autour de Y).
-        qx_corr = qz
-        qz_corr = -qx
-        
         msg.orientation.w = qw
-        msg.orientation.x = qx_corr
+        msg.orientation.x = qx
         msg.orientation.y = qy
-        msg.orientation.z = qz_corr
+        msg.orientation.z = qz
 
         calib = imu_raw.get('calib', 0)
         oc = {3: 0.0001, 2: 0.001, 1: 0.01, 0: 0.1}.get(calib, 0.01)
         msg.orientation_covariance = [oc, 0, 0, 0, oc, 0, 0, 0, oc]
 
-        lax = imu_raw.get('lax', 0) / 100.0
-        lay = imu_raw.get('lay', 0) / 100.0
-        laz = imu_raw.get('laz', 0) / 100.0
-        msg.linear_acceleration.x = laz
-        msg.linear_acceleration.y = lay
-        msg.linear_acceleration.z = -lax
+        msg.linear_acceleration.x = imu_raw.get('lax', 0) / 100.0
+        msg.linear_acceleration.y = imu_raw.get('lay', 0) / 100.0
+        msg.linear_acceleration.z = imu_raw.get('laz', 0) / 100.0
         msg.linear_acceleration_covariance = [0.005, 0, 0, 0, 0.005, 0, 0, 0, 0.005]
 
-        gx = imu_raw.get('gx', 0) / 1000.0
-        gy = imu_raw.get('gy', 0) / 1000.0
-        gz = imu_raw.get('gz', 0) / 1000.0
-        msg.angular_velocity.x = gz
-        msg.angular_velocity.y = gy
-        msg.angular_velocity.z = -gx
+        msg.angular_velocity.x = imu_raw.get('gx', 0) / 1000.0
+        msg.angular_velocity.y = imu_raw.get('gy', 0) / 1000.0
+        msg.angular_velocity.z = imu_raw.get('gz', 0) / 1000.0
         msg.angular_velocity_covariance = [0.0003, 0, 0, 0, 0.0003, 0, 0, 0, 0.0003]
 
         self._imu_pub.publish(msg)      # /imu/data     (orientation deja calibree firmware-side)
@@ -372,11 +422,6 @@ class ArduinoBridgeNode(Node):
             return
         angles = list(msg.data)[:12]
         angles += [90.0] * (12 - len(angles))  # completer si besoin
-        
-        # Appliquer les offsets de calibration
-        for i in range(12):
-            angles[i] += self._offsets[i]
-
         rounded = [round(a, 1) for a in angles]
 
         # Dedup: skip if same as last sent payload
@@ -389,6 +434,24 @@ class ArduinoBridgeNode(Node):
         payload = json.dumps({'servos': rounded, 'chk': chk}) + '\n'
         self._send(payload)
 
+    def _manual_joint_callback(self, msg: Float32MultiArray):
+        """Envoie les angles des 12 servos pour le test manuel (autorisé sans calibration)."""
+        if not self._connected:
+            return
+        angles = list(msg.data)[:12]
+        angles += [90.0] * (12 - len(angles))  # completer si besoin
+        rounded = [round(a, 1) for a in angles]
+
+        # Dedup: skip if same as last sent payload
+        if hasattr(self, '_last_manual_servo_angles') and self._last_manual_servo_angles == rounded:
+            return
+        self._last_manual_servo_angles = rounded
+        
+        # Calcul du checksum de sécurité (somme des angles modulo 1000)
+        chk = sum(int(a) for a in rounded) % 1000
+        payload = json.dumps({'servos': rounded, 'chk': chk, 'manual': True}) + '\n'
+        self._send(payload)
+
     def _calib_callback(self, msg: Float32MultiArray):
         """Enregistre les nouveaux offsets de calibration et les sauvegarde."""
         self._offsets = list(msg.data)[:12]
@@ -396,11 +459,85 @@ class ArduinoBridgeNode(Node):
         self.get_logger().info(f"Nouveaux offsets recus et appliques : {self._offsets}")
         try:
             p = Path("/opt/spotbot/config/calibration.json")
+            existing = {}
+            if p.exists():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    pass
+            existing["offsets"] = self._offsets
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
-                json.dump({"offsets": self._offsets}, f)
+                json.dump(existing, f)
+            
+            # Envoi direct à l'Arduino (dans un thread d'arrière-plan pour éviter de bloquer l'exécuteur ROS)
+            threading.Thread(target=self._sync_calibration_to_arduino, daemon=True).start()
         except Exception as e:
             self.get_logger().error(f"Erreur sauvegarde offsets : {e}")
+
+    def _sync_calibration_to_arduino(self):
+        """Lit calibration.json et envoie tous les offsets, limites et inverts à l'Arduino Mega.
+        Si tous les offsets sont zéro ET les limites sont [0,180] ET les inverts sont false,
+        envoie clear_servo_calib pour effacer les magic numbers EEPROM (sécurité)."""
+        if not self._connected:
+            return
+        p = Path("/opt/spotbot/config/calibration.json")
+        if not p.exists():
+            self.get_logger().info("Aucun fichier de calibration local trouvé pour synchro Arduino.")
+            return
+            
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            offsets = data.get("offsets", [])
+            limits = data.get("limits", [])
+            inverts = data.get("inverts", [])
+            
+            # 🔴 CRITICAL: if all offsets are zero and all limits are [0,180] and all inverts false,
+            # this means calibration is NOT configured. Send clear_servo_calib to erase EEPROM
+            # magic numbers so the Arduino safety gate (offsets_calibrated) stays active.
+            all_offsets_zero = all(abs(o) < 0.01 for o in (offsets if len(offsets) >= 12 else [0]*12))
+            all_limits_default = all(
+                len(lim) >= 2 and abs(lim[0]) < 0.01 and abs(lim[1] - 180.0) < 0.01
+                for lim in (limits[:12] if len(limits) >= 12 else [[0,180]]*12)
+            ) if len(limits) >= 12 else True
+            all_inverts_false = not any(inverts) if len(inverts) >= 12 else True
+            
+            if all_offsets_zero and all_limits_default and all_inverts_false:
+                self.get_logger().warn(
+                    "Tous les offsets sont à zéro — envoi de stop + clear_servo_calib pour désactiver "
+                    "la calibration EEPROM (sécurité interlock actif)."
+                )
+                # 🔴 CRITICAL: Send stop FIRST to detach all servos before
+                # clearing calibration. This prevents any motor movement.
+                self._send(json.dumps({"cmd": "stop"}) + '\n')
+                time.sleep(0.1)
+                self._send(json.dumps({"cmd": "clear_servo_calib"}) + '\n')
+                return
+            
+            self.get_logger().info(f"Synchronisation de la calibration vers l'Arduino ({len(offsets)} articulations)...")
+            
+            for i in range(12):
+                # 1. Offset
+                off = offsets[i] if i < len(offsets) else 0.0
+                self._send(json.dumps({"cmd": "set_offset", "index": i, "offset": float(off)}) + '\n')
+                time.sleep(0.05)
+                
+                # 2. Limits
+                lim = limits[i] if i < len(limits) else [0.0, 180.0]
+                self._send(json.dumps({"cmd": "set_limit", "index": i, "min": float(lim[0]), "max": float(lim[1])}) + '\n')
+                time.sleep(0.05)
+                
+                # 3. Invert
+                inv = inverts[i] if i < len(inverts) else False
+                self._send(json.dumps({"cmd": "set_invert", "index": i, "inverted": bool(inv)}) + '\n')
+                time.sleep(0.05)
+                
+            self.get_logger().info("Synchronisation de la calibration Arduino terminée.")
+        except Exception as e:
+            self.get_logger().error(f"Erreur lors de la synchronisation de la calibration : {e}")
 
     def _motion_callback(self, msg: String):
         """Envoie des commandes macro (stand, sit, walk, stop...)."""
@@ -427,11 +564,25 @@ class ArduinoBridgeNode(Node):
         self._send(payload)
 
     def _send(self, data: str):
+        if not self._serial or not self._serial.is_open:
+            self.get_logger().error('Tentative envoi serie mais port ferme')
+            self._connected = False
+            return
         try:
             self._serial.write(data.encode('utf-8'))
             self._serial.flush()
-        except (serial.SerialException, OSError, Exception) as e:
-            self.get_logger().error(f'Erreur envoi: {e}')
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().error(f'Erreur envoi serie: {e} — tentative reset buffer')
+            try:
+                self._serial.reset_input_buffer()
+                self._serial.reset_output_buffer()
+                self._serial.write(data.encode('utf-8'))
+                self._serial.flush()
+            except Exception:
+                self.get_logger().error('Echec retry envoi, deconnexion')
+                self._connected = False
+        except Exception as e:
+            self.get_logger().error(f'Erreur inattendue envoi: {e}')
             self._connected = False
 
     def _publish_status(self, status: str):
