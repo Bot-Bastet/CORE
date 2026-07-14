@@ -348,7 +348,7 @@ class StreamingEngine(Node):
 
         cmd = (f"ffmpeg -y -f rawvideo -pix_fmt {pix_fmt} "
                f"-s {width}x{height} -r {VIDEO_FPS} -i - "
-               f"{encoder_args} -pix_fmt yuv420p -f rtsp -rtsp_transport tcp "
+               f"{encoder_args} -pix_fmt yuv420p -f rtsp -rtsp_transport udp "
                f"rtsp://{RTSP_HOST}:{RTSP_PORT}/robot/cam{cam}")
 
         self.procs[cam] = subprocess.Popen(
