@@ -110,7 +110,7 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.22"
+#define SKETCH_VERSION    "v0.2.23"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       250000
 #define IMU_PUBLISH_MS    50      // 20 Hz
@@ -282,6 +282,11 @@ void setup() {
     pinMode(SONAR_TRIG_PIN, OUTPUT);
     pinMode(SONAR_ECHO_PIN, INPUT);
     digitalWrite(SONAR_TRIG_PIN, LOW);
+
+    // Ensure servos are detached at startup until explicitly commanded.
+    // This prevents any unintended movement when the robot powers on
+    // before calibration is configured.
+    stopServos();
 
     last_cmd_ms = millis();
     Serial.print("{\"status\":\"ready\",\"bno085\":");
@@ -488,7 +493,10 @@ void parseJSON(const char* json) {
             for (int i = 0; i < NUM_SERVOS; i++) {
                 expected_chk += (int)arr[i].as<float>();
             }
-            expected_chk = expected_chk % 1000;
+            // Normaliser dans [0,1000) : le % Python (côté Pi) ne renvoie jamais
+            // de négatif, contrairement au % C quand des angles logiques < 0
+            // (légitimes avec un gros offset) rendent la somme négative.
+            expected_chk = ((expected_chk % 1000) + 1000) % 1000;
             int actual_chk = rx_doc["chk"].as<int>();
             if (expected_chk != actual_chk) {
                 Serial.println("{\"error\":\"servos_chk_failed\"}");
@@ -509,11 +517,15 @@ void parseJSON(const char* json) {
         
         servos_enabled = true;
         for (int i = 0; i < NUM_SERVOS; i++) {
+            // ⚠ Ne PAS appliquer min/max ici : les limites EEPROM sont en espace
+            // PHYSIQUE (après offset) et sont appliquées dans applyServos(). Les
+            // borner ici, en espace LOGIQUE, amputait la course de |offset|°.
+            // Simple garde-fou contre les valeurs aberrantes.
             if (!servos[i].attached()) {
                 servos[i].attach(SERVO_PINS[i]);
-                servo_current[i] = constrain(arr[i].as<float>(), servo_min_limit[i], servo_max_limit[i]);
+                servo_current[i] = constrain(arr[i].as<float>(), -360.0f, 360.0f);
             }
-            servo_targets[i] = constrain(arr[i].as<float>(), servo_min_limit[i], servo_max_limit[i]);
+            servo_targets[i] = constrain(arr[i].as<float>(), -360.0f, 360.0f);
         }
         return;
     }
@@ -598,18 +610,34 @@ void parseJSON(const char* json) {
             
             // Validation du checksum de sécurité pour éviter les erreurs de transmission
             if (!rx_doc["chk"].isNull()) {
-                int expected_chk = (idx + (int)ang) % 100;
+                // Même normalisation que le % Python côté Pi (jamais négatif)
+                int expected_chk = (((idx + (int)ang) % 100) + 100) % 100;
                 int actual_chk = rx_doc["chk"].as<int>();
                 if (expected_chk != actual_chk) {
-                    Serial.println("{\"error\":\"write_chk_failed\"}");
+                    Serial.print("{\"error\":\"write_chk_failed\",\"index\":");
+                    Serial.print(idx);
+                    Serial.print(",\"expected\":");
+                    Serial.print(expected_chk);
+                    Serial.print(",\"actual\":");
+                    Serial.print(actual_chk);
+                    Serial.println("}");
                     return;
                 }
             }
             
             if (idx >= 0 && idx < NUM_SERVOS) {
-                if (!servos[idx].attached()) servos[idx].attach(SERVO_PINS[idx]);
-                servo_targets[idx] = constrain(ang, servo_min_limit[idx], servo_max_limit[idx]);
+                if (!servos[idx].attached()) {
+                    servos[idx].attach(SERVO_PINS[idx]);
+                }
+                // Cible en espace LOGIQUE (peut sortir de 0-180 avec un gros offset) :
+                // les limites physiques sont appliquées après offset dans applyServos().
+                servo_targets[idx] = constrain(ang, -360.0f, 360.0f);
                 servos_enabled = true;
+                Serial.print("{\"info\":\"write_accepted\",\"index\":");
+                Serial.print(idx);
+                Serial.print(",\"target\":");
+                Serial.print(servo_targets[idx], 1);
+                Serial.println("}");
             }
         }
 
@@ -622,8 +650,8 @@ void parseJSON(const char* json) {
             if (idx >= 0 && idx < NUM_SERVOS) {
                 if (!rx_doc["min"].isNull()) servo_min_limit[idx] = rx_doc["min"].as<float>();
                 if (!rx_doc["max"].isNull()) servo_max_limit[idx] = rx_doc["max"].as<float>();
-                // Clamp target courant dans les nouvelles limites
-                servo_targets[idx] = constrain(servo_targets[idx], servo_min_limit[idx], servo_max_limit[idx]);
+                // Pas de clamp de servo_targets ici : la cible est LOGIQUE, les
+                // limites sont PHYSIQUES et appliquées après offset dans applyServos().
                 save_limits_init();
                 Serial.print("{\"info\":\"limit_set\",\"index\":");
                 Serial.print(idx);
@@ -867,7 +895,8 @@ void setStand() {
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
-        servo_targets[i] = constrain(SERVO_STAND[i], servo_min_limit[i], servo_max_limit[i]);
+        // Cible logique : les limites physiques s'appliquent après offset (applyServos)
+        servo_targets[i] = SERVO_STAND[i];
     }
     Serial.println("{\"info\":\"stand\"}");
 }
@@ -876,7 +905,8 @@ void setSit() {
     servos_enabled = true;
     for (int i = 0; i < NUM_SERVOS; i++) {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
-        servo_targets[i] = constrain(SERVO_SIT[i], servo_min_limit[i], servo_max_limit[i]);
+        // Cible logique : les limites physiques s'appliquent après offset (applyServos)
+        servo_targets[i] = SERVO_SIT[i];
     }
     Serial.println("{\"info\":\"sit\"}");
 }
@@ -887,7 +917,7 @@ void stopServos() {
         pinMode(SERVO_PINS[i], OUTPUT);
         digitalWrite(SERVO_PINS[i], LOW);
     }
-    Serial.println("{\"info\":\"servos_stopped\"}");
+    Serial.println("{\"debug\":\"stopServos_called\"}");
 }
 
 // ============================================================
@@ -899,7 +929,10 @@ void stopServos() {
 //   3. Ajout de l'offset de calibration zéro
 //   4. Constrain dans [min_limit, max_limit]
 // Ainsi les commandes du Pi/URDF travaillent toujours dans un espace logique
-// cohérent (0-180° avec 90° = neutre) et l'Arduino corrige en hardware.
+// cohérent (90° = neutre ; PEUT dépasser 0-180 quand l'offset est grand, ex.
+// genou : l'IK sort ~196° à droite en stand) et l'Arduino corrige en hardware.
+// Les limites min/max EEPROM sont en espace PHYSIQUE : uniquement ici, jamais
+// sur la cible logique en amont.
 void applyServos() {
     if (!servos_enabled) return;
     for (int i = 0; i < NUM_SERVOS; i++) {
