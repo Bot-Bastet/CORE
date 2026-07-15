@@ -110,7 +110,7 @@ static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
 // ============================================================
 // Configuration
 // ============================================================
-#define SKETCH_VERSION    "v0.2.23"
+#define SKETCH_VERSION    "v0.2.24"
 #define NUM_SERVOS        12
 #define SERIAL_BAUD       250000
 #define IMU_PUBLISH_MS    50      // 20 Hz
@@ -161,6 +161,11 @@ float  servo_offset[NUM_SERVOS];
 bool   servo_inverted[NUM_SERVOS];
 bool   offsets_calibrated = false;
 bool   limits_calibrated = false;
+
+// Mode brut par servo (testeur individuel) : quand true, la cible est un
+// angle PHYSIQUE direct — applyServos saute inversion + offset + limites.
+// Jamais persisté en EEPROM ; remis à false par toute commande normale.
+bool   servo_raw_mode[NUM_SERVOS];
 
 char   json_buf[JSON_BUFFER_SIZE];
 int    json_pos = 0;
@@ -242,6 +247,7 @@ void setup() {
         servo_max_limit[i] = 180.0f;
         servo_offset[i]    = 0.0f;
         servo_inverted[i]  = false;
+        servo_raw_mode[i]  = false;
     }
     delay(50);
 
@@ -526,6 +532,7 @@ void parseJSON(const char* json) {
                 servo_current[i] = constrain(arr[i].as<float>(), -360.0f, 360.0f);
             }
             servo_targets[i] = constrain(arr[i].as<float>(), -360.0f, 360.0f);
+            servo_raw_mode[i] = false;  // les trames complètes sont toujours calibrées
         }
         return;
     }
@@ -547,7 +554,7 @@ void parseJSON(const char* json) {
     } else if (strcmp(cmd, "clear_calib") == 0) {
         clear_calibration_from_eeprom();
     } else if (strcmp(cmd, "clear_servo_calib") == 0) {
-        // Erase magic numbers for offsets and limits in EEPROM to reset calibration state
+        // Erase magic numbers for offsets, limits AND inverts in EEPROM
         EEPROM.write(EEPROM_LIMITS_ADDR + 96, 0);
         EEPROM.write(EEPROM_LIMITS_ADDR + 97, 0);
         EEPROM.write(EEPROM_LIMITS_ADDR + 98, 0);
@@ -556,6 +563,21 @@ void parseJSON(const char* json) {
         EEPROM.write(EEPROM_OFFSETS_ADDR + 49, 0);
         EEPROM.write(EEPROM_OFFSETS_ADDR + 50, 0);
         EEPROM.write(EEPROM_OFFSETS_ADDR + 51, 0);
+        EEPROM.write(EEPROM_INVERTS_ADDR + 12, 0);
+        EEPROM.write(EEPROM_INVERTS_ADDR + 13, 0);
+        EEPROM.write(EEPROM_INVERTS_ADDR + 14, 0);
+        EEPROM.write(EEPROM_INVERTS_ADDR + 15, 0);
+        // 🔴 FIX : remettre AUSSI l'état RAM aux valeurs neutres. Avant, seuls
+        // les magic numbers étaient effacés : les anciens offsets/limites/miroirs
+        // restaient actifs en mémoire jusqu'au reboot — l'utilisateur subissait
+        // toujours les limitations après un « Réinitialiser » dans le dashboard.
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            servo_offset[i]    = 0.0f;
+            servo_min_limit[i] = 0.0f;
+            servo_max_limit[i] = 180.0f;
+            servo_inverted[i]  = false;
+            servo_raw_mode[i]  = false;
+        }
         offsets_calibrated = false;
         limits_calibrated = false;
         // 🔴 CRITICAL: Immediately detach all servos to prevent any movement
@@ -629,9 +651,18 @@ void parseJSON(const char* json) {
                 if (!servos[idx].attached()) {
                     servos[idx].attach(SERVO_PINS[idx]);
                 }
-                // Cible en espace LOGIQUE (peut sortir de 0-180 avec un gros offset) :
-                // les limites physiques sont appliquées après offset dans applyServos().
-                servo_targets[idx] = constrain(ang, -360.0f, 360.0f);
+                // Mode brut (testeur individuel) : {"cmd":"write","raw":true} →
+                // l'angle est PHYSIQUE direct, applyServos saute inversion +
+                // offset + limites. Toute écriture normale ré-arme le mode calibré.
+                bool is_raw = !rx_doc["raw"].isNull() && rx_doc["raw"].as<bool>();
+                servo_raw_mode[idx] = is_raw;
+                if (is_raw) {
+                    servo_targets[idx] = constrain(ang, 0.0f, 180.0f);
+                } else {
+                    // Cible en espace LOGIQUE (peut sortir de 0-180 avec un gros offset) :
+                    // les limites physiques sont appliquées après offset dans applyServos().
+                    servo_targets[idx] = constrain(ang, -360.0f, 360.0f);
+                }
                 servos_enabled = true;
                 Serial.print("{\"info\":\"write_accepted\",\"index\":");
                 Serial.print(idx);
@@ -897,6 +928,7 @@ void setStand() {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
         // Cible logique : les limites physiques s'appliquent après offset (applyServos)
         servo_targets[i] = SERVO_STAND[i];
+        servo_raw_mode[i] = false;
     }
     Serial.println("{\"info\":\"stand\"}");
 }
@@ -907,6 +939,7 @@ void setSit() {
         if (!servos[i].attached()) servos[i].attach(SERVO_PINS[i]);
         // Cible logique : les limites physiques s'appliquent après offset (applyServos)
         servo_targets[i] = SERVO_SIT[i];
+        servo_raw_mode[i] = false;
     }
     Serial.println("{\"info\":\"sit\"}");
 }
@@ -942,6 +975,12 @@ void applyServos() {
                 servo_current[i] = servo_targets[i];
             } else {
                 servo_current[i] += (diff > 0.0f ? SERVO_SPEED : -SERVO_SPEED);
+            }
+            // Mode brut (testeur individuel) : angle physique direct, aucune
+            // transformation — sert à vérifier la course réelle et le vissage.
+            if (servo_raw_mode[i]) {
+                servos[i].write((int)constrain(servo_current[i], 0.0f, 180.0f));
+                continue;
             }
             // Inversion miroir (côté gauche/droit)
             float logical = servo_inverted[i] ? (180.0f - servo_current[i]) : servo_current[i];

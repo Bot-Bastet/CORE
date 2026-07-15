@@ -7,6 +7,14 @@ import queue
 import threading
 import subprocess
 import rclpy
+
+# Debug log to a file so we can see startup progress even when stdout/stderr are captured.
+_DEBUG_LOG_PATH = "/tmp/ros2_listener_debug.log"
+try:
+    with open(_DEBUG_LOG_PATH, "a") as _df:
+        _df.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ros2_listener module loaded\n")
+except Exception:
+    pass
 from rclpy.node import Node
 from sensor_msgs.msg import JointState, Imu
 from nav_msgs.msg import Odometry
@@ -35,6 +43,8 @@ class ROS2TelemetryListener(Node):
         qos_best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.create_subscription(Imu, '/imu/data', self.imu_callback, qos_best_effort)
+        # Real Arduino servo positions (from firmware, not motion_node)
+        self.create_subscription(Float32MultiArray, '/arduino/servo_positions', self.servo_pos_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(PoseStamped, '/orb_slam3/camera_pose', self.slam_pose_callback, 10)
         
@@ -43,14 +53,16 @@ class ROS2TelemetryListener(Node):
         # Publisher for streaming commands (delegated to streaming_engine)
         self.stream_cmd_pub = self.create_publisher(String, '/streaming/command', 10)
         self.angles_pub = self.create_publisher(Float32MultiArray, '/cmd_joint_angles', 10)
+        self.manual_angles_pub = self.create_publisher(Float32MultiArray, '/cmd_manual_joint_angles', 10)
         self.motion_pub = self.create_publisher(String, '/cmd_motion', 10)
         self.pose_pub = self.create_publisher(String, '/cmd_pose', 10)
         self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.posture_pub = self.create_publisher(String, '/cmd_posture', 10)
+        self.telemetry_counter = 0
         
-        # Timer to print state to stdout as JSON (2 Hz)
-        self.create_timer(0.5, self.publish_telemetry)
+        # Timer to print state to stdout as JSON (5 Hz)
+        self.create_timer(0.2, self.publish_telemetry)
         
         # Timer to update topics list (every 5s)
         self.create_timer(5.0, self.check_topics)
@@ -115,6 +127,12 @@ class ROS2TelemetryListener(Node):
             if len(self.path) > 150:
                 self.path.pop(0)
 
+    def servo_pos_callback(self, msg):
+        """Real Arduino servo positions (from firmware, not motion_node).
+        Uses a separate field to avoid race conditions with /joint_states."""
+        if msg.data and len(msg.data) >= 12:
+            self.servo_angles = [round(a, 1) for a in msg.data[:12]]
+
     def odom_callback(self, msg):
         self._update_pose_from_msg(msg.pose.pose.position, msg.pose.pose.orientation)
 
@@ -152,18 +170,30 @@ class ROS2TelemetryListener(Node):
 
     def publish_telemetry(self):
         import os
-        mapping = self.get_camera_devices()
-        has_cam1 = os.path.exists(mapping[1])
-        has_cam2 = os.path.exists(mapping[2])
+        self.telemetry_counter += 1
+        
+        # Fast telemetry (every tick: 0.2s / 5 Hz)
         data = {
             "type": "telemetry_diagnostics",
             "joints": self.joints,
             "imu": self.imu,
-            "pose": self.pose,
-            "path": self.path,
-            "topics": self.topics_list,
-            "cameras": {"cam1": has_cam1, "cam2": has_cam2}
+            "pose": self.pose
         }
+        # Include real Arduino servo positions if available (separate from motion_node joints)
+        if hasattr(self, 'servo_angles') and self.servo_angles:
+            data["servo_angles"] = self.servo_angles
+        
+        # Slow telemetry (every 15 ticks = 3.0s)
+        if self.telemetry_counter % 15 == 0:
+            mapping = self.get_camera_devices()
+            has_cam1 = os.path.exists(mapping[1])
+            has_cam2 = os.path.exists(mapping[2])
+            data.update({
+                "path": self.path,
+                "topics": self.topics_list,
+                "cameras": {"cam1": has_cam1, "cam2": has_cam2}
+            })
+            
         print(json.dumps(data))
         sys.stdout.flush()
 
@@ -180,19 +210,31 @@ class ROS2TelemetryListener(Node):
                 elif msg_json.get("type") == "manual_joint_control":
                     angles = msg_json.get("angles", [])
                     if len(angles) == 12:
-                        self.get_logger().info(f"Publication de manual_joint_control sur /cmd_joint_angles: {angles}")
+                        self.get_logger().info(f"Publication de manual_joint_control sur /cmd_manual_joint_angles: {angles}")
                         ang_msg = Float32MultiArray()
                         ang_msg.data = [float(x) for x in angles]
-                        self.angles_pub.publish(ang_msg)
+                        self.manual_angles_pub.publish(ang_msg)
                 elif msg_json.get("type") == "arduino_cmd":
                     cmd = msg_json.get("cmd", "")
                     if cmd:
+                        self.get_logger().info(f"[ros2_listener] arduino_cmd reçu : {cmd} payload={msg_json}")
                         motion_msg = String()
-                        if cmd in ["attach", "detach", "write"]:
+                        if cmd in ["attach", "detach", "write", "set_offset", "set_limit", "set_invert"]:
                             compact = {}
-                            for k in ["cmd", "index", "angle", "chk"]:
+                            for k in ["cmd", "index", "angle", "chk", "offset", "min", "max", "inverted", "manual", "raw"]:
                                 if k in msg_json:
                                     compact[k] = msg_json[k]
+                            if cmd in ["attach", "write"] and "manual" not in compact:
+                                compact["manual"] = True
+                                self.get_logger().info(f"[ros2_listener] Forced manual=true for arduino_cmd {cmd}")
+                            if cmd == "write" and "chk" not in compact:
+                                idx = compact.get("index")
+                                ang = compact.get("angle")
+                                if idx is not None and ang is not None:
+                                    try:
+                                        compact["chk"] = (int(idx) + int(float(ang))) % 100
+                                    except Exception:
+                                        pass
                             motion_msg.data = json.dumps(compact)
                         else:
                             motion_msg.data = cmd
@@ -248,24 +290,47 @@ class ROS2TelemetryListener(Node):
             # reached the /streaming/command publisher.
 
         # EOF reached: the parent agent.py died (or closed its write end of
-        # the stdin pipe). Without this os._exit, the main thread keeps
-        # rclpy.spin() alive forever, leaving an orphaned ROS 2 node with
-        # the same name as the next agent restart's node → duplicate-node
-        # name conflicts that silently break DDS discovery (the
-        # streaming_engine stops seeing the new /streaming/command
-        # publisher, so ffmpeg never spawns).
+        # the stdin pipe). Log the condition then exit the process immediately
+        # to avoid an orphaned ROS 2 node that would block the next restart.
+        print("[ros2_listener] EOF sur stdin — arrêt du processus", file=sys.stderr, flush=True)
         os._exit(0)
 
-def main():
-    rclpy.init()
-    node = ROS2TelemetryListener()
+
+def _debug_log(msg):
     try:
+        with open(_DEBUG_LOG_PATH, "a") as _df:
+            _df.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def main():
+    print("[ros2_listener] main() démarré", flush=True)
+    _debug_log("main() started")
+    _debug_log(f"ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', 'unset')}")
+    _debug_log(f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', 'unset')}")
+    rclpy.init()
+    print("[ros2_listener] rclpy.init() terminé", flush=True)
+    _debug_log("rclpy.init() done")
+    node = None
+    try:
+        node = ROS2TelemetryListener()
+        print("[ros2_listener] Node ROS2 démarré avec succès.", flush=True)
+        _debug_log("ROS2TelemetryListener created")
         rclpy.spin(node)
+    except Exception as e:
+        print(f"[ros2_listener] Erreur fatale: {type(e).__name__}: {e}", flush=True)
+        _debug_log(f"fatal error: {type(e).__name__}: {e} | args={getattr(e, 'args', None)}")
+        import traceback
+        traceback.print_exc()
+        _debug_log(traceback.format_exc())
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
