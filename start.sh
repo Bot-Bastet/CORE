@@ -13,9 +13,9 @@ mkdir -p $LOG
 echo "[SpotBot] Checking for updates... (disabled for development)" | tee -a $LOG/startup.log
 # python3 /opt/spotbot/updater.py >> $LOG/updater.log 2>&1
 
-# Fix HOME for ROS logging
-export HOME=/root
-mkdir -p /root/.ros/log
+# Fix HOME for ROS logging (run as bastet)
+export HOME=/home/bastet
+mkdir -p /home/bastet/.ros/log
 
 source /opt/ros2_jazzy/install/setup.bash
 source /opt/spotbot/ros2_ws/install/setup.bash
@@ -150,24 +150,32 @@ sleep 2
 # ============================================
 # 4. Arduino (auto-detect port)
 # ============================================
+ARDUINO_PORT=""
 if [ -e /dev/arduino ]; then
     ARDUINO_PORT=/dev/arduino
 elif [ -e /dev/ttyACM0 ]; then
     ARDUINO_PORT=/dev/ttyACM0
-else
-    ARDUINO_PORT=""
+elif ls /dev/ttyUSB* 1> /dev/null 2>&1; then
+    ARDUINO_PORT=$(ls /dev/ttyUSB* | sort | head -n 1)
 fi
 
+# Kill any existing bridge BEFORE doing anything else to prevent serial port
+# contention and fragmented reads when systemd restarts the service.
+pkill -f arduino_bridge_node 2>/dev/null || true
+sleep 1
+
 if [ -n "$ARDUINO_PORT" ]; then
-    # Kill any existing bridge to prevent serial port contention and fragmented reads
-    pkill -f arduino_bridge_node 2>/dev/null || true
     fuser -k "$ARDUINO_PORT" 2>/dev/null || true
     sleep 2
-    ros2 run spotbot_arduino_bridge arduino_bridge_node --ros-args \
-      -p baudrate:=500000 -p auto_flash:=false \
-      >> $LOG/arduino.log 2>&1 &
-    echo "[SpotBot] Arduino OK ($ARDUINO_PORT)" | tee -a $LOG/startup.log
+    echo "[SpotBot] Arduino detected at $ARDUINO_PORT; starting bridge with port guard." | tee -a $LOG/startup.log
+else
+    echo "[SpotBot] Arduino not detected at boot; starting bridge anyway for later auto-detection." | tee -a $LOG/startup.log
 fi
+
+ros2 run spotbot_arduino_bridge arduino_bridge_node --ros-args \
+  -p baudrate:=250000 -p auto_flash:=false \
+  >> $LOG/arduino.log 2>&1 &
+echo "[SpotBot] Arduino bridge launched" | tee -a $LOG/startup.log
 sleep 2
 
 # ============================================
@@ -224,6 +232,12 @@ echo "[SpotBot] ROSboard OK (:8888)" | tee -a $LOG/startup.log
 # ============================================
 # 7. Streaming Engine (dual-pipeline: VSLAM IPC + Gateway WebRTC)
 # ============================================
+# Tuer toute instance parasite AVANT de lancer : deux streaming_engine publient
+# chacun leur ffmpeg sur le meme path MediaMTX et s'ejectent mutuellement
+# toutes les 3-4s (stream noir cote dashboard). Meme garde que pour le bridge.
+pkill -f 'spotbot_streaming/streaming_engine' 2>/dev/null || true
+pkill -f 'spotbot_streaming streaming_engine' 2>/dev/null || true
+sleep 1
 ros2 run spotbot_streaming streaming_engine >> $LOG/streaming.log 2>&1 &
 echo "[SpotBot] Streaming Engine OK" | tee -a $LOG/startup.log
 
